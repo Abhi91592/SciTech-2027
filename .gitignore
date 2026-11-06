@@ -1,0 +1,4 @@
+.ipynb_checkpoints/
+__pycache__/
+fig_*.png
+lunar_power_results.pdf
