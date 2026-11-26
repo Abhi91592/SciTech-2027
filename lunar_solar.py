@@ -5,6 +5,7 @@
 # Version 2 (2026-11-26): general sun geometry for any site, including the lunar south pole.
 # With the defaults below (latitude 0, obliquity 0, flat horizon, point sun, pole-side
 # heliostat, vertical radiator) it reproduces version 1 exactly.
+# Speed-up (2026-11-26): the sun is calculated once per time and reused (same numbers).
 #
 # =====================================================================
 # 1. SUN POSITION
@@ -220,6 +221,38 @@ def T_sink_t(t):
     else:
         raise ValueError("radiator_orientation must be 'vertical' or 'horizontal'")
     return (F * T_surface(t)**4 + (1 - F) * T_space**4 + q_sun / (emissivity * sigma)) ** 0.25
+
+# --- Speed: the sun is calculated once per time and reused -----------------------------
+# The hourly simulation asks for the sun many times per hour (light on the receiver on
+# every pass of the hourly iteration, surface and radiator-sink temperatures in every
+# plant calculation). For a single time t, each function below is calculated once and the
+# answer is reused -- the same calculation, so the same numbers. Arrays of times (plots,
+# site statistics) are always calculated. Changing an input means re-running from Step 2
+# (Step 8 then starts with empty stores).
+def _once_per_time(fn):
+    store = {}
+    def wrapper(t, *args):
+        if args or np.ndim(t) != 0:
+            return fn(t, *args)
+        key = float(t)
+        if key not in store:
+            if len(store) > 50000:
+                store.clear()
+            store[key] = fn(t)
+        return store[key]
+    wrapper.__name__, wrapper.__doc__ = fn.__name__, fn.__doc__
+    wrapper.clear = store.clear
+    return wrapper
+
+sun_vector = _once_per_time(sun_vector)
+sun_state = _once_per_time(sun_state)
+sun_sin_elevation = _once_per_time(sun_sin_elevation)
+sun_visible = _once_per_time(sun_visible)
+cosine_factor = _once_per_time(cosine_factor)
+shading_factor = _once_per_time(shading_factor)
+solar_intercepted = _once_per_time(solar_intercepted)
+T_surface = _once_per_time(T_surface)
+T_sink_t = _once_per_time(T_sink_t)
 
 # --- 6. Site statistics (compare with published illumination studies) -----------------
 def _longest_run(mask, dt_h):
