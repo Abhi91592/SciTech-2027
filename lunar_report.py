@@ -897,7 +897,7 @@ with PdfPages(OUT_PDF) as pdf:
         w_in = 2 * FIG_W
         h_in = w_in * img.shape[0] / img.shape[1]
         ax_img = page.add_axes([(8.5 - w_in) / 2 / 8.5, 1 - (1.0 + h_in) / 11, w_in / 8.5, h_in / 11])
-        ax_img.imshow(img, interpolation='lanczos')
+        ax_img.imshow(img, interpolation='none')        # stored as is: no resampling (fast, sharp)
         ax_img.axis('off')
         page.text(0.5, 1 - (1.25 + h_in) / 11, f"Fig. {k}  {caption}", ha='center', va='top',
                   fontsize=11, family='serif', weight='bold', wrap=True)
