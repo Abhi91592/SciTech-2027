@@ -61,9 +61,20 @@ _h_phx = {ct: np.array([CP.PropsSI('H', 'T', T, 'P', P_phx_out[ct], FLUID) for T
           for ct in cycles}
 _f = np.linspace(0.0, 1.0, 61)                                          # points along an exchanger
 
+_rad_G_cache = {}                       # G(h) for each sink temperature already used
+
 def _rad_G(T_sink):
     """G(h) on the water table = radiator area per kg/s of water to cool from the top of the
-    table down to h, m2/(kg/s). Area from h_a (hot) down to h_b (cold) = G(h_b) - G(h_a)."""
+    table down to h, m2/(kg/s). Area from h_a (hot) down to h_b (cold) = G(h_b) - G(h_a).
+    Calculated once per sink temperature and reused (same numbers)."""
+    key = float(T_sink)
+    if key not in _rad_G_cache:
+        if len(_rad_G_cache) > 5000:
+            _rad_G_cache.clear()
+        _rad_G_cache[key] = _rad_G_calc(key)
+    return _rad_G_cache[key]
+
+def _rad_G_calc(T_sink):
     with np.errstate(divide='ignore'):
         f = np.where(_T_w > T_sink + 1e-6,
                      1.0 / (rad_sides * emissivity * sigma * (_T_w**4 - T_sink**4)), np.inf)
@@ -160,9 +171,11 @@ def _loop_at_flow(c, m_c, L):
     m_ch = np.maximum(L['Q_rec'] - Q_in, 0.0) * 1e3 / L['dh_ch']          # kg/s to carry the stored heat
     # By day the gas flow may not exceed the loop's design flow (m_gas^2/rho = design): above
     # it the heliostats are defocused. m_cap solves m^2 / rho(blower inlet at that flow) = ref.
+    # (Only needed while the sun charges the loop: at night Q_rec = 0, so no gas flow is
+    #  set by charging and the cap cannot act -- it is skipped, results are unchanged.)
     ref = GAS_DP_REF[L['ct']]
     with np.errstate(invalid='ignore', divide='ignore'):
-        if ref:
+        if ref and L['Q_rec'] > 0:
             m_cap = np.sqrt(ref * np.interp(L['hg_in'], _h_g, _rho_g)) * np.ones_like(Q_in)
             for _ in range(6):
                 m_cap = np.sqrt(ref * np.interp(L['hg_in'] - Q_in * 1e3 / m_cap, _h_g, _rho_g))
