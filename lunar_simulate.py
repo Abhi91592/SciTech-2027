@@ -1,9 +1,9 @@
-# lunar_simulate.py -- hour-by-hour TES energy balance over the lunar day and night
+# lunar_simulate.py -- step-by-step TES energy balance over the lunar month
 # Loaded by Step 9 of Lunar_Regolith_TES_Cycle.ipynb (keep this file next to the notebook).
 # Not a stand-alone script: it uses the regolith (Step 3), plant (Step 6) and solar
 # (Step 8) functions, the inputs (Step 2) and np from Step 1.
 # ---------------------------------------------------------------------
-# TES energy balance over time (day and night), for cycle ct
+# TES energy balance over time (sunlit and dark), for cycle ct
 #   dE_TES/dt = Q_solar(t, T_TES) - Q_curtail - Q_in(T_TES) - Q_loss(T_TES)
 #   Q_solar   : solar heat into the TES gas loop, net of receiver losses (Step 8); the
 #               receiver temperature comes from the gas loop (Step 6), so it is iterated
@@ -14,16 +14,19 @@
 #   Q_in      : heat drawn by the cycle, including the extra heat for the parasitic loads
 #               (Step 6); reduced in hours when the radiator cannot take full power
 #   Q_loss    : heat lost through the insulation (Step 3)
-# Parasitic loads: heliostat drives by day (w_helio_drive x mirror area); the gas-loop
-# blower and the coolant pump day and night (Step 6). By day the blower moves the gas for
-# the heat actually stored (Q_solar - Q_curtail - Q_in).
+# Parasitic loads: heliostat drives while the sun is up (w_helio_drive x mirror area); the
+# gas-loop blower and the coolant pump always (Step 6). With the sun up the blower moves the
+# gas for the heat actually stored (Q_solar - Q_curtail - Q_in).
 # Explicit time steps of dt hours. The arrays hold the state at the START of each step
 # (t0, t0 + dt, ..., t0 + n_steps*dt: n_steps + 1 points) and the flows during that step;
 # e_end is the TES energy after the last of these n_steps + 1 steps.
 # Energy check: m_TES * (e_end - e_start) = sum over steps of
 #   (Q_solar - Q_curtail - Q_in - Q_loss) * dt   (include Q_loss in any balance, Step 12)
-# t0 = hours since sunrise at the first step
-# require_full = True: the run also fails in any hour the plant cannot give the full
+# Sun: taken at the MIDDLE of each step, t + dt/2 (midpoint rule), from the site's design
+# month (Step 8). A step is sunlit (is_day) when the sun is visible at its middle -- the same
+# test Step 8 uses to find the darkness, so the energy and the day/dark labels agree.
+# t0 = simulation time of the first step (h); Step 10 starts runs at t_dark0 or t_rise
+# require_full = True: the run also fails in any step the plant cannot give the full
 # 100 kWe (radiator limit, or blower too large near the TES floor); used for sizing
 # ---------------------------------------------------------------------
 e_full = e_regolith(T_TES_max)       # J/kg at full charge
@@ -43,11 +46,12 @@ def simulate(m_TES, A_col, e_start, n_steps, t0=0.0, ct='simple', require_full=T
     T_rec = None                                             # receiver temperature, warm start
     for k in range(n_steps + 1):
         t = t0 + k * dt
+        ts = t + 0.5 * dt                                    # sun at mid-step
         T = T_from_e(e)
         if T < T_cut - 1e-6:                                 # TES below the usable floor
             survived = False
             break
-        Q_sun_in = A_col * float(solar_intercepted(t)) / 1e3   # kW concentrated light on receiver
+        Q_sun_in = A_col * float(solar_intercepted(ts)) / 1e3  # kW concentrated light on receiver
         W_helio = w_helio_drive * A_col / 1e3 if Q_sun_in > 0 else 0.0   # kWe heliostat drives
         Q_loss = float(TES_heat_loss(T, m_TES))                # kW through the insulation
         room = (e_full - e) * m_TES / (1e3 * dt * 3600)        # kW the TES can still take this step
@@ -58,9 +62,9 @@ def simulate(m_TES, A_col, e_start, n_steps, t0=0.0, ct='simple', require_full=T
             T_rec = T + dT_TES_HX + 0.5 * dT_charge + dT_wall    # first guess
         Q_in_g, Q_max_g = 0.0, np.inf
         for _ in range(12):
-            Q_sun = A_col * float(solar_flux(t, T_rec)) / 1e3  # kW net into the gas loop
+            Q_sun = A_col * float(solar_flux(ts, T_rec)) / 1e3 # kW net into the gas loop
             Q_store = min(Q_sun, room + Q_in_g + Q_loss, Q_max_g)   # what fits (TES and gas loop)
-            p = plant_point(T, t, ct, W_extra=W_helio, Q_rec=Q_store)
+            p = plant_point(T, ts, ct, W_extra=W_helio, Q_rec=Q_store)
             if p['too_cold']:
                 break
             T_new = p['T_rec'] if np.isfinite(p['T_rec']) else T_rec
@@ -72,14 +76,14 @@ def simulate(m_TES, A_col, e_start, n_steps, t0=0.0, ct='simple', require_full=T
         if p['too_cold']:                                    # turbine inlet below the cycle cutoff
             survived = False
             break
-        if require_full and (not p['running'] or p['part_load']):   # demand not met this hour
+        if require_full and (not p['running'] or p['part_load']):   # demand not met this step
             survived = False
             break
         Q_store = min(Q_sun, room + p['Q_in'] + Q_loss, p['Q_rec_max'])
         Q_curt = Q_sun - Q_store                               # kW curtailed (TES full or gas-loop flow limit)
         e_new = min(e + (Q_store - p['Q_in'] - Q_loss) * 1e3 * dt * 3600 / m_TES, e_full)
         out['t'].append(t)
-        out['is_day'].append(np.mod(t, t_lunar) < t_day)
+        out['is_day'].append(bool(sun_visible(ts) > 0))     # sun up at mid-step (Step 8)
         out['E_TES'].append(m_TES * e / 3.6e6)               # kWh above T_TES_min
         out['Q_solar'].append(Q_sun)
         out['Q_curtail'].append(Q_curt)

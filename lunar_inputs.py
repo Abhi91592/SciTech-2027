@@ -2,201 +2,264 @@
 # Loaded by Step 2 of Lunar_Regolith_TES_Cycle.ipynb (keep this file next to the notebook).
 # Edit the values here to run a different case, then run the notebook from Step 1.
 # Not a stand-alone script: it uses np, CP and say() from Step 1 of the notebook.
-# Sources for the input values: tags [R..] refer to the reference list in Step 14.
+# Sources for the input values: tags [R..] refer to the reference list in the report (Step 12).
+# [A] = assumed engineering value with no single source: list these in the paper and cover
+#       them with the sensitivity study.
 # =====================================================================
-# Full lunar day-night cycle: solar tower -> regolith TES -> sCO2 (simple + recuperated)
+# Solar tower -> regolith TES -> sCO2 Brayton cycle (simple + recuperated), lunar south pole
 # Quasi-steady model following Prasad et al. (Table 2, Table 3, Appendix A)
-# Day:   solar heat charges the TES; the cycle runs from the TES
-# Night: the cycle runs from the TES only
-# Layout as in the paper's Fig. 2 (loops described below):
-#   TES gas loop (sCO2): receiver -> regolith TES -> PHX -> gas tank -> blower -> receiver
+#   Sun up:  solar heat charges the TES; the cycle runs from the TES
+#   Dark:    the cycle runs from the TES only
+# WHEN the sun is up is not set here: Step 8 (lunar_solar.py) works it out from the site
+# below (latitude, seasons, horizon) and sets the sunlit time and the longest darkness.
+# Layout (two TES gas loops, paper Fig. 4):
+#   charging loop (sCO2, sun only):   blower 1 -> receiver -> TES end A -> TES end B -> blower 1
+#   discharging loop (sCO2, always):  blower 2 -> TES end B -> TES end A -> PHX -> blower 2
 #   power cycle (sCO2):  PHX -> turbine -> (recuperator) -> precooler -> compressor -> PHX
 #   coolant loop (water): precooler -> habitat heat exchanger -> plant radiator -> pump
-# The turbine inlet follows the TES: TIT = T_TES -/+ dT_TES_HX - dT_PHX (Step 6)
+# TES = sintered-regolith bricks in N segments; both loops pass every segment, in counterflow
+# (lunar_tes.py, Step 3).
+# The turbine inlet follows the gas leaving TES end A: TIT = T_gas,A - dT_PHX (Step 6)
+#
+# Sections:  1 run settings | 2 site and sun | 3 demand and parasitic loads |
+#            4 heliostat field and receiver | 5 TES gas loops | 6 TES bricks in segments |
+#            7 sCO2 cycle | 8 coolant loop | 9 plant radiator and environment |
+#            10 habitat | 11 values that follow from the inputs | 12 checks | 13 log
 # =====================================================================
 
-# --- Lunar day / night timing ---
-t_lunar = 29.53 * 24       # h, synodic lunar day-night cycle
-t_night = t_lunar / 2      # h, lunar night duration
-t_day = t_lunar - t_night  # h, lunar daytime
-dt = 1.0                   # h, time step
-n_day = int(round(t_day / dt))
-n_night = int(round(t_night / dt))
-n_cycle = n_day + n_night
-# snap durations to whole time steps so sunrise/sunset fall on a step
-# (708.72 h -> 708 h with dt = 1 h: 354 h day + 354 h night)
-t_day, t_night, t_lunar = n_day * dt, n_night * dt, n_cycle * dt
+# --- 1. Run settings -------------------------------------------------------------------
+dt = 1.00                  # h, time step (10 h for trial runs, 1 h for the paper results)
+n_cycles_periodic = 4      # lunar months simulated to reach a repeating state (Step 10)
+cycles = ['simple', 'recuperated']   # both cycles are calculated every run (Section IV)
 
-# --- Electrical demand (same day and night) ---
-W_elec_target = 100.0      # kWe, habitat electrical demand (Table 2: 75-150 kWe)
-eta_gen = 0.95             # generator efficiency, fraction (Table 2) [R17]
+# --- 2. Site and sun (used by Step 8) ---------------------------------------------------
+#   'south_pole': Connecting Ridge, between Shackleton and de Gerlache craters (site CR1,
+#                 89.47 S [R21]). The sun circles the horizon once per synodic month and its
+#                 elevation swings +-1.54 deg over the draconic year (polar seasons).
+#                 LOCAL HORIZON = SYNTHETIC PROFILE [A], not measured terrain: the horizon
+#                 lies 2.0 deg below level all round (rim and peak horizons are mostly below
+#                 level [R21]), with one mountain range 4.0 deg high and 25 deg wide in
+#                 azimuth. Chosen so the site statistics fall in the published range: over
+#                 one draconic year it gives 89.0 % sunlight and a longest darkness of 4.4 d;
+#                 LOLA studies of Connecting Ridge give up to 92.27 % at 2 m height and a
+#                 longest continuous darkness typically 3-5 d [R20]. Replace the two arrays
+#                 (horizon_az_deg, horizon_el_deg) with a LOLA horizon for the final results.
+#   'equator':    flat ground at the equator: 354 h day + 354 h night (comparison case)
+SITE = 'south_pole'
+t_lunar = 29.53 * 24       # h, synodic month (sun returns to the same azimuth) [R8]
+t_draconic = 346.62 * 24   # h, draconic year (period of the polar seasons)
+if SITE == 'south_pole':
+    latitude_deg = -89.47                  # deg, Connecting Ridge site CR1 [R21]
+    obliquity_deg = 1.54                   # deg, lunar obliquity: sun elevation swing
+    season_phase_deg = 0.0                 # deg, season at t = 0 (Step 8 picks the darkest month)
+    horizon_az_deg = np.arange(0.0, 361.0, 2.0)                    # deg, azimuth (0 = north)
+    _daz = (horizon_az_deg + 180.0) % 360.0 - 180.0                # deg from the mountain (az 0)
+    horizon_el_deg = -2.0 + 4.0 * np.exp(-(_daz / 25.0) ** 2)      # deg, SYNTHETIC horizon [A]
+    sun_disk = True                        # sun as a disk: partly up when it grazes the horizon
+    T_surf_night = 53.0                    # K, coldest regolith at south-pole candidate sites
+                                           #    (range +22 C to -220 C) [R22]
+    T_ground = 53.0                        # K, ground around the TES: conservative lower bound
+                                           #    (coldest regolith [R22]); colder ground = more
+                                           #    TES heat loss. Loss is < 1 % of the solar heat,
+                                           #    so this value barely changes the results.
+elif SITE == 'equator':
+    latitude_deg = 0.0
+    obliquity_deg = 0.0
+    season_phase_deg = 0.0
+    horizon_az_deg = np.array([0.0, 360.0])
+    horizon_el_deg = np.array([0.0, 0.0])  # flat ground
+    sun_disk = False                       # point sun (the earlier model)
+    T_surf_night = 100.0                   # K, equatorial surface at night [R8]
+    T_ground = 250.0                       # K, equatorial subsurface at ~1 m [R9]
+else:
+    raise ValueError("SITE must be 'south_pole' or 'equator'")
 
-# --- Plant layout (paper Fig. 2): two heat-transfer loops around the sCO2 cycle ---
-# (1) TES gas loop (sCO2, one blower, runs DAY AND NIGHT):
-#       receiver -> regolith TES -> PHX -> TES gas tank -> blower -> receiver
-#     Day:   the receiver heats the gas; the gas gives heat to the TES and then to the PHX.
-#     Night: the receiver is bypassed (valves); the gas picks up heat in the TES and
-#            gives it to the cycle in the PHX.
-#     Gas leaving the TES: T_TES + dT_TES_HX while the sun charges it, T_TES - dT_TES_HX
-#     at night. PHX (counterflow, gas -> cycle sCO2): turbine inlet = gas inlet - dT_PHX,
-#     gas flow = the smallest flow that keeps every point of the PHX >= dT_PHX apart.
-#     By day the gas flow is also at least what carries the stored heat with a rise of
-#     dT_charge in the receiver. Blower: W = m_gas * dp / (rho * eta_blower), dp = dp_loop * P_loop at the
-#     design flow, scaling with m_gas^2/rho; rho at the blower inlet (coldest gas, after the PHX).
-# (2) Coolant loop (pumped water, runs DAY AND NIGHT):
-#       precooler (cycle sCO2 -> water) -> habitat heat exchanger -> plant radiator -> pump
-#     Water enters the precooler dT_precool below the compressor inlet; its flow is the
-#     smallest that keeps every point of the precooler >= dT_precool apart and the water
-#     outlet <= T_cool_max. Habitat heating is taken from the hot water first.
-#     Pump: W = m_water * dp_cool_loop / (rho * eta_pump).
-
-# --- Parasitic loads: everything the plant needs on top of the 100 kWe habitat demand ---
-# All of it is generated by the cycle: W_net = (W_elec_target + W_aux) / eta_gen (Step 6).
-#   always: controls W_aux_fixed + TES-loop blower + coolant pump
-#   day:    heliostat drives = w_helio_drive * A_col
+# --- 3. Electrical demand and parasitic loads -----------------------------------------
+# Everything the plant needs on top of the habitat demand is generated by the cycle:
+#   W_net = (W_elec_target + W_aux) / eta_gen (Step 6)
+#   always:     controls W_aux_fixed + TES-loop blower + coolant pump
+#   sun up:     heliostat drives = w_helio_drive * A_col
 # (moving the CYCLE sCO2 itself is the compressor's work, already in the cycle efficiency)
-W_aux_fixed = 3.0          # kWe, controls, sensors, power electronics (always; assumed)
-w_helio_drive = 0.5        # W per m2 of mirror, heliostat tracking drives (day) [R19]
+W_elec_target = 100.0      # kWe, habitat electrical demand, constant (Table 2: 75-150 kWe)
+eta_gen = 0.95             # generator efficiency, fraction (Table 2) [R17]
+W_aux_fixed = 3.0          # kWe, controls, sensors, power electronics (always) [A]
+w_helio_drive = 0.5        # W per m2 of mirror, heliostat tracking drives (sun up) [R19]
 
-# --- TES gas loop (sCO2) ---
-P_loop = 25.0e6          # Pa, gas-loop pressure (same as the cycle high side; assumed)
-dp_loop = 0.03             # pressure drop round the loop (receiver + TES + PHX + tank) at the
-                           #    loop's design flow, fraction of P_loop (assumed); it scales with
-                           #    m_gas^2/rho, design = largest m_gas^2/rho of normal operation (Step 10)
-eta_blower = 0.70          # blower efficiency, fraction (assumed)
-dT_charge = 150.0          # K, largest gas rise above the TES gas exit while charging (sets
-                           #    the daytime gas flow; receiver outlet <= T_TES + dT_TES_HX + dT_charge)
-dT_TES_HX = 10.0           # K, gas leaving the TES: above T_TES by day, below T_TES at night (assumed)
-dT_wall = 20.0             # K, receiver wall above the mean gas temperature inside it (assumed)
-# Receiver (radiating) temperature, solved each hour (Step 6):
-#   T_rec = (gas in + gas out) / 2 + dT_wall, gas in = PHX gas outlet (after the tank)
-
-# --- Coolant loop (water) ---
-COOLANT = 'Water'
-P_cool_loop = 1.5e6        # Pa, water-loop pressure (boils at ~471 K; assumed)
-T_cool_max = 450.0         # K, highest water temperature leaving the precooler (assumed)
-dT_precool = 10.0          # K, smallest gap in the precooler, sCO2 to water (assumed)
-dp_cool_loop = 0.15e6      # Pa, pressure drop round the water loop (assumed)
-eta_pump = 0.70            # pump efficiency, fraction (assumed)
-
-# --- TES (regolith) ---
-T_TES_max = 800.0          # K, fully charged
-T_TES_min = 450.0          # K, lower limit
-rho_TES = 1500.0           # kg/m3, regolith bulk density (Table 3) [R7]
-regolith_type = 'highlands'   # 'high_Ti_mare', 'low_Ti_mare', 'highlands'
-TES_mass_margin = 1.20     # TES mass = margin x minimum mass for the night alone
-# Heat loss from the TES through an insulating layer of loose regolith (Step 9):
-#   Q_loss = k_reg(T_avg) * A_TES / L_ins * (T_TES - T_ground)
-#   A_TES = surface of a cube holding the TES volume, k_reg from Table 3 (Step 3)
-L_ins = 1.0                # m, thickness of loose-regolith insulation around the TES
-T_ground = 250.0           # K, surrounding subsurface regolith (equator, ~1 m) [R9]
-T_charge_out_max = T_TES_max + dT_TES_HX + dT_charge   # K, highest receiver gas outlet
-
-# --- Solar tower / CSP ---
+# --- 4. Heliostat field and receiver (Step 8) -------------------------------------------
 G_sun = 1361.0             # W/m2, total solar irradiance at 1 AU [R1]
-# Heliostat field (collector area = mirror area). Optical chain:
-#   light on receiver = G_sun * A_col * cosine factor(t) * rho_mirror * f_dust * f_intercept
+# Two-axis heliostats around a tower; collector area = mirror area. Light on the receiver:
+#   G_sun * A_col * visible sun * cosine factor(t) * shading(t) * rho_mirror * f_dust * f_intercept
+field_layout = 'surround' if SITE == 'south_pole' else 'pole_side'
+                           # 'surround': heliostats all round the tower (sun circles the horizon)
+                           # 'pole_side': one heliostat on the pole side (equator, earlier model)
+n_field_az = 36            # heliostat directions round the tower ('surround')
+beta_target_deg = 30.0     # deg, elevation of the receiver seen from a heliostat [A]
+heliostat_spacing_ratio = None   # D/H, mirror spacing / mirror height, for low-sun shading
+                                 #   f_shade = min(1, D/H * tan(elevation)); None = no shading
+                                 #   (no shading is optimistic at the pole: sensitivity case) [A]
 rho_mirror = 0.95          # mirror reflectance, fraction [R2]
 f_dust = 0.93              # dust/soiling factor, fraction (terrestrial heliostats lose 6-9 %) [R3]
-f_intercept = 0.95         # spillage/intercept and blocking factor, fraction (assumed)
-eta_opt = rho_mirror * f_dust * f_intercept     # optical efficiency without the cosine factor
-beta_target_deg = 30.0     # deg, elevation of the receiver seen from a representative heliostat
+f_intercept = 0.95         # spillage/intercept and blocking factor, fraction [A]
 # Receiver: absorbs alpha_rec of the concentrated light and radiates
 # eps_rec*sigma*T_rec^4 from its aperture (area = A_col / C_ratio); T_rec from the gas loop.
 alpha_rec = 0.95           # receiver absorptance, fraction [R4]
 eps_rec = 0.85             # receiver thermal emittance, fraction [R4]
 C_ratio = 500.0            # concentration ratio, towers typically 500-1000 [R5]
-latitude_deg = 0.0         # site latitude (0 = equator)
-collector_mode = 'heliostat'   # 'heliostat': two-axis heliostats, cosine factor (Step 8)
-                               # 'fixed': flux x sin(sun elevation); 'tracking': full flux
-n_cycles_periodic = 4      # lunar cycles simulated to reach a repeating state
 
-# --- sCO2 Brayton cycle (Table 2) ---
+# --- 5. TES gas loops (sCO2, two loops, both at P_loop) -------------------------------------
+#   Charging loop (sun only): blower 1 -> receiver -> TES end A -> TES end B -> blower 1.
+#     Blower 1 sets its flow so the gas leaves the receiver at T_rec_set:
+#       m_1 = Q_solar / (h(T_rec_set) - h(gas back from end B)).
+#   Discharging loop (always): blower 2 -> TES end B -> TES end A -> PHX -> blower 2.
+#     Blower 2 gives the smallest flow that keeps every point of the PHX >= dT_PHX apart
+#     (set by the heat the cycle needs). Turbine inlet = gas leaving end A - dT_PHX.
+#   Blowers sit on the cold legs. Power = m * dp / (rho(blower inlet) * eta_blower),
+#   dp = N_segments * dp_seg + dp_other_frac * P_loop (bricks + receiver or PHX + piping).
+#   Receiver temperature: (gas in + gas out) / 2 + dT_wall.
+P_loop = 15.0e6            # Pa, pressure of both TES gas loops (cycle stays at P_high) [A]
+T_rec_set = 810.0          # K, receiver gas outlet, held by blower 1 (= T_TES_max + 10 K) [A]
+eta_blower = 0.70          # blower efficiency, both blowers, fraction [A]
+dp_other_frac = 0.01       # pressure drop outside the TES bricks (receiver or PHX + piping),
+                           #    fraction of P_loop, each loop [A]
+dT_wall = 20.0             # K, receiver wall above the mean gas temperature inside it [A]
+# Used only by the current lunar_plant.py (single TES loop); removed when it is updated:
+dp_loop = 0.03             # LEGACY: loop pressure drop at design flow, fraction of P_loop
+dT_charge = 150.0          # LEGACY: largest gas rise in the receiver while charging
+
+# --- 6. TES bricks in segments (lunar_tes.py, Step 3) ---------------------------------------
+# Sintered-regolith bricks stacked in N_segments equal segments along the gas path, insulated
+# with loose regolith. Each segment is one block at one temperature. Assumptions [A]:
+#   - perfect heat exchange in each segment: gas leaves a segment at that segment's temperature
+#   - no heat conduction between segments
+#   - both loops pass every segment, in opposite directions (charging A -> B, discharging B -> A)
+#   - pressure drop through the bricks = N_segments * dp_seg per loop
+# Brick heat capacity: Schreiner cp(T) (Step 3); it matches measured sintered simulant
+# (~0.74 J/g-K at room temperature [R23]).
+T_TES_max = 800.0          # K, fully charged
+T_TES_min = 450.0          # K, lower limit
+regolith_type = 'highlands'   # 'high_Ti_mare', 'low_Ti_mare', 'highlands' (pole: highlands)
+rho_TES = 2400.0           # kg/m3, sintered regolith density (oven-sintered simulant
+                           #    2300-2570 kg/m3 [R23]); sets the store volume and surface
+TES_mass_margin = 1.20     # TES mass = margin x minimum mass for the longest darkness alone [A]
+N_segments = 10            # segments from end A (hot) to end B (cold), choose any number >= 2 [A]
+dp_seg = 0.25e5            # Pa, pressure drop in EACH segment (0.25 bar) [A]
+                           #    (bricks in total: N_segments * dp_seg per loop)
+# Heat loss through an insulating layer of loose regolith around the store (a cube of volume
+# m_TES / rho_TES), shared equally by the segments:
+#   Q_loss = k_reg(T_avg) * A / L_ins * (T_segment - T_ground)
+L_ins = 1.0                # m, thickness of loose-regolith insulation around the TES [A]
+# T_ground (ground around the TES) is set with the site, section 2
+
+# --- 7. sCO2 Brayton cycle (Table 2) ---------------------------------------------------
 FLUID = 'CO2'
-# The compressor inlet temperature changes hour by hour: it is the coldest value
-# the fixed radiator can reach (Step 6), never below T_comp_in.
-T_comp_in = 320.0          # K, LOWEST compressor inlet temperature (radiator bypass below this)
-T_comp_in_max = 380.0      # K, highest compressor inlet; if the radiator still cannot reject
-                           #    the waste heat, the cycle runs at reduced power that hour
-P_low = 8.0e6              # Pa, compressor inlet pressure, 80 bar (Table 2: 7.5-8.0 MPa)
+# The compressor inlet changes hour by hour: the coldest value the fixed radiator can
+# reach (Step 6), never below T_comp_in.
+T_comp_in = 320.0          # K, LOWEST compressor inlet (radiator bypass below this)
+T_comp_in_max = 380.0      # K, highest compressor inlet; above it the cycle runs at reduced power [A]
+P_low = 8.0e6              # Pa, compressor inlet pressure (Table 2: 7.5-8.0 MPa)
 P_high = 25.0e6            # Pa, compressor outlet pressure (Table 2: 20-25 MPa)
-# Pressure drops, as a fraction of the pressure entering each component (0.01 = 1 %).
-# The turbine inlet and outlet pressures follow from them (Steps 4 and 5):
-#   turbine inlet  = P_high after the PHX (and recuperator cold side)
-#   turbine outlet = what is needed so that, after the recuperator hot side
-#                    and the cooler/radiator, P_low is left at the compressor
-dp_PHX = 0.01              # fraction, PHX pressure drop
-dp_recup = 0.01            # fraction, pressure drop on each side of the recuperator
-dp_cooler = 0.01           # fraction, pressure drop of cooler + radiator
+# Pressure drops, fraction of the pressure entering each component (0.01 = 1 %);
+# the turbine inlet and outlet pressures follow from them (Steps 4 and 5).
+dp_PHX = 0.01              # fraction, PHX [A]
+dp_recup = 0.01            # fraction, each side of the recuperator [A]
+dp_cooler = 0.01           # fraction, precooler + radiator [A]
 eta_comp = 0.85            # compressor isentropic efficiency, fraction [R10]
 eta_turb = 0.90            # turbine isentropic efficiency, fraction [R10]
-# Primary heat exchanger (PHX): TES gas -> power-cycle sCO2, counterflow (Fig. 2).
-#   turbine inlet = gas inlet - dT_PHX; gas flow sized so no point is closer than dT_PHX
-dT_PHX = 10.0              # K, PHX approach (hot end and smallest gap)
-eta_cycle_min = 0.05       # fraction, cycle is shut down below this efficiency
+eps_recup = 0.95           # recuperator effectiveness, fraction (recuperated cycle) [R11]
+dT_PHX = 10.0              # K, PHX approach, TES gas -> cycle sCO2 (hot end and smallest gap) [A]
+eta_cycle_min = 0.05       # fraction, cycle is shut down below this efficiency [A]
 
-# --- Cycle configurations (Section IV): both are calculated every run ---
-cycles = ['simple', 'recuperated']
-eps_recup = 0.95           # recuperator effectiveness, fraction [R11]
+# --- 8. Coolant loop (pumped water, runs whenever the cycle runs) -------------------------
+#   precooler (cycle sCO2 -> water) -> habitat heat exchanger -> plant radiator -> pump
+#   Water enters the precooler dT_precool below the compressor inlet; its flow is the
+#   smallest that keeps every point of the precooler >= dT_precool apart and the water
+#   outlet <= T_cool_max. Habitat heating is taken from the hot water first.
+#   Pump: W = m_water * dp_cool_loop / (rho * eta_pump).
+COOLANT = 'Water'
+P_cool_loop = 1.5e6        # Pa, water-loop pressure (boils at ~471 K) [A]
+T_cool_max = 450.0         # K, highest water temperature leaving the precooler [A]
+dT_precool = 10.0          # K, smallest gap in the precooler, sCO2 to water [A]
+dp_cool_loop = 0.15e6      # Pa, pressure drop round the water loop [A]
+eta_pump = 0.70            # pump efficiency, fraction [A]
 
-# Turbine inlet limit follows the TES automatically -- do not set by hand
-TIT_max = T_TES_max - dT_TES_HX - dT_PHX   # turbine inlet, TES full, at night (design point)
-TIT_top = T_TES_max + dT_TES_HX - dT_PHX   # highest turbine inlet: TES full while charging
+# --- 9. Plant radiator and its environment (sink temperature from Step 8) ----------------
+# The coolant water flows through the panels, so the panel temperature falls along the
+# panel from the water inlet to the outlet (Step 6).
+rad_area_margin = 1.00     # installed radiator = margin x peak need of normal operation (Step 10) [A]
+rad_sides = 2              # shaded panels radiate from both faces [R12]; areas are panel areas
+rad_areal_mass = 14.0      # kg/m2 of panel, ISS-type deployable radiator [R12]
+emissivity = 0.85          # radiator emissivity (0.6-0.9) [A]
+# Radiator: vertical panels, edge-on to the sun and shaded from the ground, so they see
+# deep space only: sink temperature = T_space at all times (Step 8). [A]
+# Lunar surface (habitat wall surroundings, Step 6): flat ground in radiative balance with
+# the visible sun, T = max(T_surf_night, T_surf_noon * (sin elevation)^0.25) (Step 8).
+# T_surf_night is set with the site (section 2).
+T_surf_noon = 392.0        # K, surface with the sun overhead (subsolar point, measured at the
+                           #    equator [R8]); a reference only: Step 8 scales it with the local
+                           #    sun elevation, so at the pole (sun within ~2 deg of the horizon)
+                           #    flat ground stays near T_surf_night
+T_space = 3.0              # K, deep space
+sigma = 5.670374419e-8     # W/m2-K4, Stefan-Boltzmann constant
 
-# --- Habitat (heat balance each hour, Step 6) ---
-# The habitat is held at T_hab. Its heat balance decides, hour by hour, whether
-# it needs HEATING (taken from the cycle waste heat) or COOLING (its own thermal
-# control system: radiator, plus a heat pump when the sky is too warm).
-# Size from NASA Lunar Architecture Team: ~419 m3 pressurized volume for 4 crew.
+# --- 10. Habitat (heat balance each hour, Step 6) ---------------------------------------
+# Held at T_hab. Its heat balance decides, hour by hour, whether it needs HEATING (taken
+# from the cycle waste heat) or COOLING (its own radiator, plus a heat pump when the sky
+# is too warm). Size from the NASA Lunar Architecture Team: ~419 m3 for 4 crew.
 T_hab = 295.0              # K, indoor temperature
 n_crew = 4                 # crew
 q_metab = 14e6 / 86400 / 1e3   # kW per person, 14 MJ/person/day [R16]
 V_hab = 419.0              # m3, pressurized volume, crew of 4 [R13]
-D_hab = 6.0                # m, habitat diameter (cylinder with flat ends)
+D_hab = 6.0                # m, habitat diameter (cylinder with flat ends) [A]
 eps_MLI = 0.02             # MLI effective emittance of the habitat wall [R14]
-f_elec_inside = 1.0        # share of W_elec_target used inside the habitat (life support,
-                           # experiments, cooling): it all ends up as heat inside
+f_elec_inside = 1.0        # share of W_elec_target used inside the habitat (ends up as heat) [A]
 T_hab_rad = 283.0          # K, habitat radiator temperature [R12]
-T_hp_evap = 275.0          # K, heat-pump cold side (habitat coolant)
+T_hp_evap = 275.0          # K, heat-pump cold side (habitat coolant) [A]
 T_hp_cond = 360.0          # K, heat-pump hot side (radiator) when the sky is too warm [R15]
 f_carnot_hp = 0.43         # heat-pump COP as a fraction of Carnot [R15]
-dT_hab_rad = 30.0          # K, use the heat pump when the sky is within this of T_hab_rad
+dT_hab_rad = 30.0          # K, use the heat pump when the sky is within this of T_hab_rad [A]
+
+# --- 11. Values that follow from the inputs (do not set by hand) -----------------------
+# One synodic month in a whole, even number of time steps (708.72 h -> 708 h at dt = 1 h,
+# 700 h at dt = 10 h; the same as the earlier half-day + half-night model).
+# The sunlit time and the longest darkness (t_day, t_night, n_day, n_night) are set in
+# Step 8 from the site.
+n_cycle = 2 * int(round(t_lunar / (2 * dt)))
+t_lunar = n_cycle * dt
+eta_opt = rho_mirror * f_dust * f_intercept     # optical efficiency without the cosine factor
+T_charge_out_max = max(T_rec_set, T_TES_max + dT_charge)   # K, hottest gas (LEGACY plant table range)
+TIT_max = T_TES_max - dT_PHX               # K, turbine inlet with the TES full (design point)
+TIT_top = TIT_max                          # K, highest turbine inlet (same, sun or no sun)
 _L_hab = V_hab / (np.pi * D_hab**2 / 4)
-A_hab = np.pi * D_hab * _L_hab + 2 * np.pi * D_hab**2 / 4      # m2 wall area
+A_hab = np.pi * D_hab * _L_hab + 2 * np.pi * D_hab**2 / 4      # m2, habitat wall area
+T_sink_night = T_space      # K, radiator sink (deep space; the panels never see the ground)
 
-# --- Plant radiator ---
-# Radiator: the coolant-loop water flows through the panels, so the panel temperature
-# falls along the panel from the water inlet to the water outlet (Step 6).
-rad_area_margin = 1.00     # installed radiator = margin x peak need of normal operation (Step 10)
-rad_sides = 2              # shaded panels radiate from both faces [R12]; areas are panel areas
-rad_areal_mass = 14.0      # kg/m2 of panel, ISS-type deployable radiator [R12]
-emissivity = 0.85          # radiator emissivity (0.6-0.9)
-sigma = 5.670374419e-8     # W/m2-K4
-
-# --- Radiator environment (varies with the sun angle, see Step 8) ---
-T_surf_night = 100.0       # K, lunar surface at night [R8]
-T_surf_noon = 392.0        # K, lunar surface at noon (equator) [R8]
-T_space = 3.0              # K, deep space
-F_rad_surf = 0.5           # radiator view factor to the lunar surface (vertical panel)
-shield = True              # True: radiator shaded from the surface (sees space only)
-_F = 0.0 if shield else F_rad_surf
-T_sink_night = (_F * T_surf_night**4 + (1 - _F) * T_space**4) ** 0.25   # K, night sink
-
-# --- Input checks: stop with a clear message if inputs are inconsistent ---
+# --- 12. Input checks: stop with a clear message if inputs are inconsistent ------------
 T_crit, P_crit = 304.13, 7.3773e6     # CO2 critical point
-# timing
-assert dt > 0, "dt must be > 0"
-assert 0 < t_night < t_lunar, "t_night must be shorter than the lunar cycle"
+# run and site
+assert dt > 0 and n_cycle >= 10, "dt must be > 0 and give at least 10 steps per month"
 assert n_cycles_periodic >= 1, "n_cycles_periodic must be >= 1"
+assert -90 < latitude_deg < 90, "latitude_deg must be between -90 and 90 (poles excluded)"
+assert 0 <= obliquity_deg < 10, "obliquity_deg must be in [0, 10)"
+assert len(horizon_az_deg) == len(horizon_el_deg) >= 2, "horizon_az_deg and horizon_el_deg must match"
+assert np.all(np.diff(horizon_az_deg) > 0), "horizon_az_deg must increase"
 # demand and parasitic loads
 assert W_elec_target > 0, "W_elec_target must be > 0"
 assert W_aux_fixed >= 0, "W_aux_fixed must be >= 0"
 assert w_helio_drive >= 0, "w_helio_drive must be >= 0"
-assert 0 <= dp_loop < 0.2 and 0 < eta_blower <= 1, "Check dp_loop and eta_blower"
-assert dp_cool_loop >= 0 and 0 < eta_pump <= 1, "Check dp_cool_loop and eta_pump"
+# heliostat field and receiver
+assert field_layout in ('surround', 'pole_side'), "field_layout must be 'surround' or 'pole_side'"
+assert 0 < beta_target_deg < 90, "beta_target_deg must be between 0 and 90"
+assert heliostat_spacing_ratio is None or heliostat_spacing_ratio > 0, "heliostat_spacing_ratio must be None or > 0"
+assert 0 < eta_opt <= 1, "rho_mirror * f_dust * f_intercept must be in (0, 1]"
+assert 0 < alpha_rec <= 1 and 0 < eps_rec <= 1, "Receiver absorptance/emittance must be in (0, 1]"
+assert C_ratio > 1, "C_ratio must be > 1"
 # gas loop
+assert 0 <= dp_loop < 0.2 and 0 < eta_blower <= 1, "Check dp_loop and eta_blower"
 assert dT_charge > 0, "dT_charge must be > 0"
-assert dT_TES_HX >= 0 and dT_wall >= 0, "dT_TES_HX and dT_wall must be >= 0"
+assert dT_wall >= 0, "dT_wall must be >= 0"
+assert P_loop > P_crit, "P_loop must be above the CO2 critical pressure"
+assert T_rec_set > T_TES_max, "T_rec_set must be above T_TES_max (the blocks charge from it)"
+assert 0 <= dp_other_frac < 0.1, "dp_other_frac must be in [0, 0.1)"
 assert T_charge_out_max <= 1100, \
     f"Receiver sCO2 outlet ({T_charge_out_max:.0f} K) is above the CoolProp CO2 range (1100 K)"
 # TES
@@ -204,55 +267,59 @@ assert T_TES_max > T_TES_min, "T_TES_max must be greater than T_TES_min"
 assert T_TES_min >= 350, "Regolith cp correlation (Table 3, T > 350 K) needs T_TES_min >= 350 K"
 assert T_TES_max <= 1100, "Above ~1100 K regolith starts to sinter and CoolProp CO2 data end"
 assert rho_TES > 0, "rho_TES must be > 0"
+assert N_segments >= 2, "N_segments must be >= 2"
+assert dp_seg >= 0 and N_segments * dp_seg + dp_other_frac * P_loop < 0.5 * P_loop, \
+    "Loop pressure drop must stay below 50 % of P_loop (check dp_seg x N_segments)"
 assert TES_mass_margin > 1.0, "TES_mass_margin must be > 1 so the TES survives dawn and dusk"
 assert L_ins > 0, "L_ins must be > 0"
 assert 0 < T_ground < T_TES_min, "T_ground must be below T_TES_min"
-# solar / receiver
-assert 0 < eta_opt <= 1, "rho_mirror * f_dust * f_intercept must be in (0, 1]"
-assert 0 < alpha_rec <= 1 and 0 < eps_rec <= 1, "Receiver absorptance/emittance must be in (0, 1]"
-assert C_ratio > 1, "C_ratio must be > 1"
-assert -90 < latitude_deg < 90, "latitude_deg must be between -90 and 90 (poles excluded)"
-assert collector_mode in ('heliostat', 'fixed', 'tracking'), "collector_mode must be 'heliostat', 'fixed' or 'tracking'"
-assert 0 < beta_target_deg < 90, "beta_target_deg must be between 0 and 90"
-assert rad_sides in (1, 2), "rad_sides must be 1 or 2"
 # cycle
 assert T_comp_in > T_crit, f"T_comp_in must be above CO2 critical temperature ({T_crit} K)"
+assert T_comp_in_max > T_comp_in, "T_comp_in_max must be above T_comp_in"
 assert P_low > P_crit, f"P_low must be above CO2 critical pressure ({P_crit/1e6:.2f} MPa)"
 assert P_high > P_low, "P_high must be greater than P_low"
+assert 0 <= dp_PHX < 0.1 and 0 <= dp_recup < 0.1 and 0 <= dp_cooler < 0.1, "Pressure drops must be in [0, 0.1)"
 assert 0 < eta_comp <= 1 and 0 < eta_turb <= 1 and 0 < eta_gen <= 1, "Efficiencies must be in (0, 1]"
+assert 0 <= eps_recup < 1, "eps_recup must be in [0, 1)"
 assert dT_PHX > 0, "dT_PHX must be > 0"
 assert TIT_max > T_comp_in + 30, "TES too cold: turbine inlet would be below the compressor range"
 assert 0 <= eta_cycle_min < 1, "eta_cycle_min must be in [0, 1)"
-assert 0 <= eps_recup < 1, "eps_recup must be in [0, 1)"
-# waste heat / radiator / environment
-assert 0 < eps_MLI < 1, "eps_MLI must be in (0, 1)"
-assert 0 <= f_elec_inside <= 1, "f_elec_inside must be in [0, 1]"
-assert T_hp_cond > T_hab > T_hp_evap and 0 < f_carnot_hp <= 1, "Check the heat-pump inputs"
+# coolant loop
+assert dp_cool_loop >= 0 and 0 < eta_pump <= 1, "Check dp_cool_loop and eta_pump"
 assert T_comp_in - dT_precool > T_hab, "Coolant water must be warmer than the habitat to heat it"
 assert T_comp_in_max - dT_precool < T_cool_max, "T_cool_max must be above the coldest water"
 assert T_cool_max < CP.PropsSI('T', 'P', P_cool_loop, 'Q', 0, COOLANT) - 5, \
     "Water would boil: raise P_cool_loop or lower T_cool_max"
-assert 0 < emissivity <= 1, "emissivity must be in (0, 1]"
-assert T_comp_in_max > T_comp_in, "T_comp_in_max must be above T_comp_in"
-assert T_comp_in > T_sink_night, "Compressor inlet must be hotter than the night sink"
-assert 0 <= dp_PHX < 0.1 and 0 <= dp_recup < 0.1 and 0 <= dp_cooler < 0.1, "Pressure drops must be in [0, 0.1)"
+# radiator and environment
 assert rad_area_margin >= 1.0, "rad_area_margin must be >= 1"
+assert rad_sides in (1, 2), "rad_sides must be 1 or 2"
+assert 0 < emissivity <= 1, "emissivity must be in (0, 1]"
 assert T_surf_noon > T_surf_night > T_space, "Need T_surf_noon > T_surf_night > T_space"
-assert 0 <= F_rad_surf <= 1, "F_rad_surf must be between 0 and 1"
+assert T_comp_in > T_sink_night, "Compressor inlet must be hotter than the night sink"
+# habitat
+assert 0 < eps_MLI < 1, "eps_MLI must be in (0, 1)"
+assert 0 <= f_elec_inside <= 1, "f_elec_inside must be in [0, 1]"
+assert T_hp_cond > T_hab > T_hp_evap and 0 < f_carnot_hp <= 1, "Check the heat-pump inputs"
 
-# --- Soft warnings: allowed, but outside the paper's Table 2 ranges ---
+# Soft warnings: allowed, but outside the paper's Table 2 ranges
 for _name, _v, _lo, _hi, _u in [("T_comp_in", T_comp_in, 305, 320, "K"),
                                 ("P_low", P_low / 1e6, 7.5, 8.0, "MPa"),
                                 ("P_high", P_high / 1e6, 20, 25, "MPa")]:
     if not (_lo <= _v <= _hi):
         say(f"Note: {_name} = {_v:g} {_u} is outside Table 2 ({_lo}-{_hi} {_u})")
 
-say(f"Inputs OK: cycles {cycles}, TES {T_TES_max:.0f} -> {T_TES_min:.0f} K, TIT max {TIT_max:.0f} K, "
-    f"PR {P_high/P_low:.2f}, compressor inlet {T_comp_in:.0f}-{T_comp_in_max:.0f} K at "
-    f"{P_low/1e6:.1f} MPa, day {t_day:.0f} h / night {t_night:.0f} h")
+# --- 13. Log ---------------------------------------------------------------------------
+say(f"Inputs OK: site '{SITE}' (latitude {latitude_deg:.2f} deg; sunlight and darkness from Step 8), "
+    f"time step {dt:g} h, month {t_lunar:.0f} h = {n_cycle} steps")
+say(f"Cycles {cycles}, TES {T_TES_max:.0f} -> {T_TES_min:.0f} K, TIT max {TIT_max:.0f} K, "
+    f"PR {P_high/P_low:.2f}, compressor inlet {T_comp_in:.0f}-{T_comp_in_max:.0f} K at {P_low/1e6:.1f} MPa")
 say(f"Demand: {W_elec_target:.0f} kWe + parasitic: controls {W_aux_fixed:.0f} kWe, gas-loop blower and "
-    f"coolant pump (day and night), heliostat drives {w_helio_drive:g} W/m2 (day) -- solved each hour in Step 6")
-say(f"TES gas loop (sCO2, {P_loop/1e6:.0f} MPa, dp {dp_loop*100:g} %): TES gas exit T_TES +/- {dT_TES_HX:.0f} K, "
-    f"PHX approach {dT_PHX:.0f} K, receiver gas outlet up to {T_charge_out_max:.0f} K")
+    f"coolant pump (always), heliostat drives {w_helio_drive:g} W/m2 (sun up) -- solved each hour in Step 6")
+say(f"Heliostat field '{field_layout}', receiver {C_ratio:.0f}x, optics {eta_opt:.3f} | ground around "
+    f"TES {T_ground:.0f} K, coldest surface {T_surf_night:.0f} K, radiator sink {T_sink_night:.0f} K")
+say(f"TES gas loops (sCO2, {P_loop/1e6:.0f} MPa): receiver outlet {T_rec_set:.0f} K, PHX approach "
+    f"{dT_PHX:.0f} K, other dp {dp_other_frac*100:g} % per loop, blowers eta {eta_blower:.2f}")
+say(f"TES bricks: sintered regolith {rho_TES:.0f} kg/m3 in {N_segments} segments (gas leaves each at its "
+    f"temperature), brick dp {dp_seg/1e5:g} bar per segment = {N_segments*dp_seg/1e5:g} bar per loop")
 say(f"Coolant loop ({COOLANT}, {P_cool_loop/1e6:.1f} MPa): precooler gap {dT_precool:.0f} K, "
     f"water up to {T_cool_max:.0f} K, dp {dp_cool_loop/1e3:.0f} kPa")

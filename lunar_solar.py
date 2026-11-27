@@ -2,15 +2,17 @@
 # Loaded by Step 8 of Lunar_Regolith_TES_Cycle.ipynb (keep this file next to the notebook).
 # Not a stand-alone script: it uses the inputs (Step 2) and np, say() from Step 1.
 #
-# Version 2 (2026-11-26): general sun geometry for any site, including the lunar south pole.
-# With the defaults below (latitude 0, obliquity 0, flat horizon, point sun, pole-side
-# heliostat, vertical radiator) it reproduces version 1 exactly.
-# Speed-up (2026-11-26): the sun is calculated once per time and reused (same numbers).
+# Sun geometry for any site, including the lunar south pole. The sunlit hours and the
+# darkness come from the sun position and the local horizon, not from a fixed
+# 354 h day + 354 h night. The simulation repeats the site's DARKEST synodic month
+# (section 6). SITE = 'equator' in Step 2 gives back the half-day / half-night model.
+# Speed: the sun is calculated once per time and reused (same numbers).
 #
 # =====================================================================
 # 1. SUN POSITION
 # ---------------------------------------------------------------------
-# t = hours since the start of the run. Hour angle w advances one full turn per synodic
+# t = site time, h (the simulation time mapped onto the design month, section 0).
+# Hour angle w advances one full turn per synodic
 # month and is -90 deg at t = 0 (sunrise on flat ground at the equator):
 #     w = 2 pi t / t_lunar - pi/2
 # Sun declination (subsolar latitude) swings with the lunar obliquity over the draconic
@@ -71,30 +73,38 @@
 #                                        q_sun = alpha_rad * G_sun * visible * sin(elevation)
 #   shield = True: F = 0 for either orientation.
 # Not included: sunlight reflected by the surface, regolith thermal inertia, local slopes.
+#
+# 6. DESIGN MONTH (the sizing case)
+# ---------------------------------------------------------------------
+# The plant must carry the longest darkness of the year, so the simulation repeats the
+# synodic month that contains it, centred on it. A time step is dark when the sun is
+# hidden at its midpoint. Details in section 6 of the code.
 # =====================================================================
 
-# --- New inputs (set them in Step 2; defaults reproduce version 1) -------------------
-_v2_defaults = {
-    'obliquity_deg': 0.0,            # deg, lunar obliquity; 1.54 for real seasons
-    't_draconic': 346.62 * 24,       # h, draconic year (period of the declination swing)
-    'season_phase_deg': 0.0,         # deg, phase of the declination at t = 0
-                                     #   90 -> dec = +obliquity at t = 0 (southern winter, worst
-                                     #   case for a south-pole site); -90 -> northern winter
-    'horizon_az_deg': np.array([0.0, 360.0]),   # deg, azimuths of the horizon table
-    'horizon_el_deg': np.array([0.0, 0.0]),     # deg, horizon elevation (flat ground)
-    'sun_disk': False,               # True: partial sun at the horizon (finite solar disk)
-    'field_layout': 'pole_side',     # 'pole_side' (version 1) or 'surround'
-    'n_field_az': 36,                # heliostat directions around the tower ('surround')
-    'heliostat_spacing_ratio': None, # D/H, ground spacing / mirror height; None = no shading
-    'radiator_orientation': 'vertical',   # 'vertical' (version 1) or 'horizontal'
-    'alpha_rad': 0.20,               # radiator solar absorptance ('horizontal' only)
-}
-for _k, _v in _v2_defaults.items():
-    if _k not in globals():
-        globals()[_k] = _v
-
+# --- Inputs: all from Step 2 (lunar_inputs.py, sections 2, 4 and 9) ---------------------
+#   site:  latitude_deg, obliquity_deg, t_lunar, t_draconic, season_phase_deg,
+#          horizon_az_deg, horizon_el_deg, sun_disk
+#   field: collector_mode, field_layout, n_field_az, beta_target_deg, heliostat_spacing_ratio,
+#          eta_opt, G_sun, alpha_rec, eps_rec, C_ratio
+#   sink:  radiator_orientation, alpha_rad, shield, F_rad_surf, T_surf_night, T_surf_noon,
+#          T_space, emissivity, sigma
+#   run:   dt, n_cycle
+# Sets for the later steps: t_day, t_night, n_day, n_night (sunlit time and longest
+# darkness of the design month), t_dark0, n_dark, t_rise, site_time(), is_dark_step().
 SUN_RADIUS_DEG = 0.2665             # deg, angular radius of the sun seen from the Moon
 _EL_TOL_DEG = 1e-9                  # deg, round-off guard: sun exactly on the horizon = not up
+
+# --- 0. Site time: simulation time -> time on the site's design month (section 6) ------
+#     t_site = T_WIN0 + mod(t, P_WIN),   P_WIN = n_cycle * dt (one synodic month)
+# Every sun function below takes the SIMULATION time t; T_WIN0 is set in section 6.
+# For illumination statistics over a whole year the mapping is switched off (_ABS).
+T_WIN0, P_WIN = 0.0, n_cycle * dt
+_ABS = False
+
+def site_time(t):
+    """Simulation time (h) -> time on the site's design month (h)."""
+    t = np.asarray(t, dtype=float)
+    return t if _ABS else T_WIN0 + np.mod(t, P_WIN)
 
 # --- 1. Sun position ------------------------------------------------------------------
 def _hour_angle(t):
@@ -107,21 +117,23 @@ def sun_declination(t):
     return np.radians(obliquity_deg) * np.sin(2.0 * np.pi * t / t_draconic
                                               + np.radians(season_phase_deg))
 
-def sun_vector(t):
-    """Unit vector to the sun (east, north, up) at the site."""
+def _sun_vector_site(t):
+    """Unit vector to the sun (east, north, up) at site time t (no mapping)."""
     w, dec, phi = _hour_angle(t), sun_declination(t), np.radians(latitude_deg)
     e = -np.cos(dec) * np.sin(w)
     n = np.cos(phi) * np.sin(dec) - np.sin(phi) * np.cos(dec) * np.cos(w)
     u = np.sin(phi) * np.sin(dec) + np.cos(phi) * np.cos(dec) * np.cos(w)
     return e, n, u
 
+def sun_vector(t):
+    """Unit vector to the sun (east, north, up) at the site, simulation time t."""
+    return _sun_vector_site(site_time(t))
+
 def horizon_elevation(az_deg):
     """Local horizon elevation (deg) at azimuth az_deg (deg), from the horizon table."""
     return np.interp(np.mod(az_deg, 360.0), horizon_az_deg, horizon_el_deg, period=360.0)
 
-def sun_state(t):
-    """Sun elevation (deg), azimuth (deg) and visible fraction of the solar disk (0-1)."""
-    e, n, u = sun_vector(t)
+def _sun_state_from(e, n, u):
     el = np.degrees(np.arcsin(np.clip(u, -1.0, 1.0)))
     az = np.mod(np.degrees(np.arctan2(e, n)), 360.0)
     d = el - horizon_elevation(az)
@@ -131,6 +143,14 @@ def sun_state(t):
     else:
         vis = (d > _EL_TOL_DEG).astype(float)
     return el, az, vis
+
+def sun_state(t):
+    """Sun elevation (deg), azimuth (deg) and visible fraction of the solar disk (0-1)."""
+    return _sun_state_from(*sun_vector(t))
+
+def _sun_state_site(t):
+    """sun_state at site time t (no mapping): used to find the design month."""
+    return _sun_state_from(*_sun_vector_site(t))
 
 def sun_sin_elevation(t):
     """sin(sun elevation) while the sun is visible, else 0 (name kept from version 1)."""
@@ -254,7 +274,63 @@ solar_intercepted = _once_per_time(solar_intercepted)
 T_surface = _once_per_time(T_surface)
 T_sink_t = _once_per_time(T_sink_t)
 
-# --- 6. Site statistics (compare with published illumination studies) -----------------
+# --- 6. Design month: the darkest synodic month of the site -------------------------
+# The plant must carry the longest darkness of the year, so the simulation repeats the
+# synodic month that contains it (cycle after cycle in the sizing, Step 10):
+#   1. find the longest darkness over one draconic year (sun disk fully hidden), on a
+#      fine grid of g = 0.125 h; it starts at site time ts_dark
+#   2. the design month starts half a month before it: T_WIN0 = ts_dark - (n_cycle//2) dt,
+#      so the darkness sits in the middle and the month wraps around in sunlight
+#   3. on the simulation steps, a step is DARK when the sun is hidden at its midpoint;
+#      the longest dark run starts at step i_dark0 (t_dark0 = i_dark0 dt) and lasts n_dark
+#      steps; "sunrise" = the end of it, t_rise. Other, shorter dark spells in the month
+#      are simulated as they come.
+# Replaces the half-day / half-night timing of Step 2:
+#   t_night = longest darkness, t_day = rest of the month (n_night, n_day likewise).
+# Equator, flat horizon: T_WIN0 = 0, t_dark0 = 354 h, n_dark = 354 -> version 1 exactly.
+def _runs(mask):
+    """(start, length) of each run of True in a boolean array."""
+    m = np.concatenate(([False], np.asarray(mask, bool), [False])).astype(int)
+    d = np.diff(m)
+    starts, ends = np.where(d == 1)[0], np.where(d == -1)[0]
+    return starts, ends - starts
+
+def _design_month():
+    g = 0.125                                            # h, search grid (exact in binary)
+    span = (t_draconic if obliquity_deg > 0 else 0.0) + 2 * P_WIN
+    tt = np.arange(0.0, span, g)
+    st, ln = _runs(_sun_state_site(tt)[2] <= 0)
+    if ln.size == 0:
+        return 0.0, 0, 0                                 # never dark (not expected)
+    ts_dark = st[np.argmax(ln)] * g                      # first longest darkness
+    T0 = ts_dark - (n_cycle // 2) * dt
+    k = np.arange(n_cycle)
+    dark = _sun_state_site(T0 + (k + 0.5) * dt)[2] <= 0
+    st, ln = _runs(np.concatenate((dark, dark)))         # twice: runs across the wrap
+    keep = st < n_cycle
+    st, ln = st[keep], np.minimum(ln[keep], n_cycle)
+    j = np.argmax(ln)
+    return T0, int(st[j]), int(ln[j])
+
+T_WIN0, i_dark0, n_dark = _design_month()
+_k_mid = np.arange(n_cycle)
+_dark_steps = _sun_state_site(T_WIN0 + (_k_mid + 0.5) * dt)[2] <= 0
+if n_dark == 0:
+    raise RuntimeError("The site is never dark on the time steps: nothing for the TES to carry")
+n_lit = n_cycle - n_dark
+t_dark0 = i_dark0 * dt                                   # h, start of the longest darkness
+t_rise = ((i_dark0 + n_dark) % n_cycle) * dt             # h, end of it ("sunrise")
+n_night, n_day = n_dark, n_lit                           # replace the Step 2 placeholders
+t_night, t_day = n_dark * dt, n_lit * dt
+for _f in (sun_vector, sun_state, sun_sin_elevation, sun_visible, cosine_factor,
+           shading_factor, solar_intercepted, T_surface, T_sink_t):
+    _f.clear()                                           # T_WIN0 is now set
+
+def is_dark_step(t):
+    """True if the sun is hidden at the midpoint of the step that starts at t."""
+    return bool(sun_visible(t + 0.5 * dt) <= 0)
+
+# --- 7. Site statistics (compare with published illumination studies) -----------------
 def _longest_run(mask, dt_h):
     """Longest continuous run of True in a boolean series, in hours."""
     best = run = 0
@@ -266,12 +342,17 @@ def _longest_run(mask, dt_h):
 def illumination_stats(t_end=None, dt_h=1.0):
     """Illumination fraction, longest darkness/light (h), sun elevation range, mean
     cosine factor and radiator-sink range over [0, t_end] (default: one draconic year)."""
+    global _ABS
     t_end = t_draconic if t_end is None else t_end
     tt = np.arange(0.0, t_end, dt_h)
-    el, _, vis = sun_state(tt)
-    lit = vis > 0
-    cf = cosine_factor(tt)[lit]
-    Ts = T_sink_t(tt)
+    _ABS = True                                     # real site time, not the design month
+    try:
+        el, _, vis = sun_state(tt)
+        lit = vis > 0
+        cf = cosine_factor(tt)[lit]
+        Ts = T_sink_t(tt)
+    finally:
+        _ABS = False
     return {
         'illum_fraction': float(vis.mean()),
         'longest_dark_h': _longest_run(~lit, dt_h),
@@ -283,6 +364,9 @@ def illumination_stats(t_end=None, dt_h=1.0):
 
 # --- Quick look -----------------------------------------------------------------------
 _st = illumination_stats(t_end=max(t_lunar, t_draconic if obliquity_deg > 0 else t_lunar))
+SITE_STATS = dict(_st, T_WIN0=T_WIN0, t_dark0=t_dark0, t_rise=t_rise, n_dark=n_dark,
+                  dark_hours_month=float(_dark_steps.sum() * dt),
+                  lit_fraction_month=float(1 - _dark_steps.mean()))
 say(f"Site: latitude {latitude_deg:.2f} deg, obliquity {obliquity_deg:.2f} deg, "
     f"horizon {'flat' if not np.any(horizon_el_deg) else 'from table'}, "
     f"field '{field_layout}', radiator '{radiator_orientation}'")
@@ -291,10 +375,14 @@ say(f"  Sun lit {100*_st['illum_fraction']:.1f} % of the time | longest darkness
     f"sun elevation {_st['el_min_deg']:.1f} to {_st['el_max_deg']:.1f} deg")
 say(f"  Radiator sink {_st['T_sink_min']:.0f} to {_st['T_sink_max']:.0f} K | mean cosine "
     f"factor while lit {_st['mean_cosine_lit']:.3f}")
+say(f"Design month (darkest of the year, site time {T_WIN0:.1f} h onward): longest darkness "
+    f"{t_night:.0f} h from t = {t_dark0:.0f} h, sunrise t = {t_rise:.0f} h | dark "
+    f"{SITE_STATS['dark_hours_month']:.0f} of {P_WIN:.0f} h ({100*SITE_STATS['lit_fraction_month']:.1f} % lit) "
+    f"| time step {dt:g} h")
 say(f"Receiver: alpha {alpha_rec}, emissivity {eps_rec}, concentration {C_ratio:.0f}x, "
     f"T_rec from the gas loop | optics {eta_opt:.3f}")
 _T_rec_show = (600.0, 750.0, 900.0)                     # K, receiver temperatures to tabulate
-_tt = np.arange(0.0, max(t_lunar, t_draconic if obliquity_deg > 0 else t_lunar), 0.25)
+_tt = np.arange(0.0, P_WIN, 0.25)                      # design month (simulation time)
 _el_series, _, _vis_series = sun_state(_tt)
 say(f"{'sun elev':>9}" + "".join(f"{f'T_rec {T:.0f} K':>14}" for T in _T_rec_show))
 for el in (90, 45, 30, 15, 10, 5, 2, 1):
