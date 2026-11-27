@@ -32,47 +32,33 @@ dt = 1.00                  # h, time step (10 h for trial runs, 1 h for the pape
 n_cycles_periodic = 4      # lunar months simulated to reach a repeating state (Step 10)
 cycles = ['simple', 'recuperated']   # both cycles are calculated every run (Section IV)
 
-# --- 2. Site and sun (used by Step 8) ---------------------------------------------------
-#   'south_pole': Connecting Ridge, between Shackleton and de Gerlache craters (site CR1,
-#                 89.47 S [R21]). The sun circles the horizon once per synodic month and its
-#                 elevation swings +-1.54 deg over the draconic year (polar seasons).
-#                 LOCAL HORIZON = SYNTHETIC PROFILE [A], not measured terrain: the horizon
-#                 lies 2.0 deg below level all round (rim and peak horizons are mostly below
-#                 level [R21]), with one mountain range 4.0 deg high and 25 deg wide in
-#                 azimuth. Chosen so the site statistics fall in the published range: over
-#                 one draconic year it gives 89.0 % sunlight and a longest darkness of 4.4 d;
-#                 LOLA studies of Connecting Ridge give up to 92.27 % at 2 m height and a
-#                 longest continuous darkness typically 3-5 d [R20]. Replace the two arrays
-#                 (horizon_az_deg, horizon_el_deg) with a LOLA horizon for the final results.
-#   'equator':    flat ground at the equator: 354 h day + 354 h night (comparison case)
-SITE = 'south_pole'
+# --- 2. Site and sun: lunar south pole (used by Step 8) ----------------------------------
+# Connecting Ridge, between Shackleton and de Gerlache craters: the highest point of the ridge
+# in the LOLA 5 m site map (1959 m, 0.9 km from site CR1 [R21]); the best-lit point found
+# on the ridge in a 50 m / 20 m search of the site map with lunar_horizon.py [R24].
+# The sun circles the horizon once per synodic month; its elevation swings +-1.54 deg over
+# the draconic year (polar seasons). The sun is treated as a disk, so it can be partly up
+# when it grazes the horizon.
+# LOCAL HORIZON = LOLA terrain [R24]: computed once with lunar_horizon.py (run on its own)
+# from the LOLA 5 m site map and the 80 m map of 80-90 S, observer 2 m above the ground,
+# every 0.5 deg of azimuth; saved in HORIZON_FILE next to the notebook. All of it is set by
+# terrain more than 30 km away; it lies 0.55-3.31 deg below level. Over one draconic year
+# it gives ~88 % sunlight and a longest darkness of ~4.4 d (Glaser et al. [R20]: up to
+# 92.27 % at 2 m on Connecting Ridge, longest darkness typically 3-5 d).
 t_lunar = 29.53 * 24       # h, synodic month (sun returns to the same azimuth) [R8]
 t_draconic = 346.62 * 24   # h, draconic year (period of the polar seasons)
-if SITE == 'south_pole':
-    latitude_deg = -89.47                  # deg, Connecting Ridge site CR1 [R21]
-    obliquity_deg = 1.54                   # deg, lunar obliquity: sun elevation swing
-    season_phase_deg = 0.0                 # deg, season at t = 0 (Step 8 picks the darkest month)
-    horizon_az_deg = np.arange(0.0, 361.0, 2.0)                    # deg, azimuth (0 = north)
-    _daz = (horizon_az_deg + 180.0) % 360.0 - 180.0                # deg from the mountain (az 0)
-    horizon_el_deg = -2.0 + 4.0 * np.exp(-(_daz / 25.0) ** 2)      # deg, SYNTHETIC horizon [A]
-    sun_disk = True                        # sun as a disk: partly up when it grazes the horizon
-    T_surf_night = 53.0                    # K, coldest regolith at south-pole candidate sites
-                                           #    (range +22 C to -220 C) [R22]
-    T_ground = 53.0                        # K, ground around the TES: conservative lower bound
-                                           #    (coldest regolith [R22]); colder ground = more
-                                           #    TES heat loss. Loss is < 1 % of the solar heat,
-                                           #    so this value barely changes the results.
-elif SITE == 'equator':
-    latitude_deg = 0.0
-    obliquity_deg = 0.0
-    season_phase_deg = 0.0
-    horizon_az_deg = np.array([0.0, 360.0])
-    horizon_el_deg = np.array([0.0, 0.0])  # flat ground
-    sun_disk = False                       # point sun (the earlier model)
-    T_surf_night = 100.0                   # K, equatorial surface at night [R8]
-    T_ground = 250.0                       # K, equatorial subsurface at ~1 m [R9]
-else:
-    raise ValueError("SITE must be 'south_pole' or 'equator'")
+latitude_deg = -89.4390    # deg, Connecting Ridge top (longitude -137.144 deg) [R24]
+obliquity_deg = 1.54       # deg, lunar obliquity: sun elevation swing
+season_phase_deg = 0.0     # deg, season at t = 0 (Step 8 picks the darkest month)
+HORIZON_FILE = 'horizon_CR_top.csv'                            # from lunar_horizon.py [R24]
+_hz = np.loadtxt(HORIZON_FILE, delimiter=',')                  # azimuth, elevation, distance
+horizon_az_deg = _hz[:, 0]                                     # deg, azimuth (0 = north, 90 = east)
+horizon_el_deg = _hz[:, 1]                                     # deg, horizon elevation (LOLA)
+T_surf_night = 53.0        # K, coldest regolith at south-pole candidate sites
+                           #    (range +22 C to -220 C) [R22]
+T_ground = 53.0            # K, ground around the TES: conservative lower bound (coldest
+                           #    regolith [R22]); colder ground = more TES heat loss. Loss is
+                           #    < 1 % of the solar heat, so this value barely changes the results.
 
 # --- 3. Electrical demand and parasitic loads -----------------------------------------
 # Everything the plant needs on top of the habitat demand is generated by the cycle:
@@ -89,10 +75,9 @@ w_helio_drive = 0.5        # W per m2 of mirror, heliostat tracking drives (sun 
 G_sun = 1361.0             # W/m2, total solar irradiance at 1 AU [R1]
 # Two-axis heliostats around a tower; collector area = mirror area. Light on the receiver:
 #   G_sun * A_col * visible sun * cosine factor(t) * shading(t) * rho_mirror * f_dust * f_intercept
-field_layout = 'surround' if SITE == 'south_pole' else 'pole_side'
-                           # 'surround': heliostats all round the tower (sun circles the horizon)
-                           # 'pole_side': one heliostat on the pole side (equator, earlier model)
-n_field_az = 36            # heliostat directions round the tower ('surround')
+# Heliostats all round the tower (the sun circles the horizon); cosine factor averaged over
+# n_field_az directions.
+n_field_az = 36            # heliostat directions round the tower
 beta_target_deg = 30.0     # deg, elevation of the receiver seen from a heliostat [A]
 heliostat_spacing_ratio = None   # D/H, mirror spacing / mirror height, for low-sun shading
                                  #   f_shade = min(1, D/H * tan(elevation)); None = no shading
@@ -109,7 +94,10 @@ C_ratio = 500.0            # concentration ratio, towers typically 500-1000 [R5]
 # --- 5. TES gas loops (sCO2, two loops, both at P_loop) -------------------------------------
 #   Charging loop (sun only): blower 1 -> receiver -> TES end A -> TES end B -> blower 1.
 #     Blower 1 sets its flow so the gas leaves the receiver at T_rec_set:
-#       m_1 = Q_solar / (h(T_rec_set) - h(gas back from end B)).
+#       m_1 = Q_charge / (h(T_rec_set) - h(gas back from end B)),
+#     but never more than the flow that gives a dT_charge rise in the receiver. When the gas
+#     back from end B is hotter than T_rec_set - dT_charge (store nearly full), the store
+#     takes less and the rest of the sun is defocused.
 #   Discharging loop (always): blower 2 -> TES end B -> TES end A -> PHX -> blower 2.
 #     Blower 2 gives the smallest flow that keeps every point of the PHX >= dT_PHX apart
 #     (set by the heat the cycle needs). Turbine inlet = gas leaving end A - dT_PHX.
@@ -122,9 +110,7 @@ eta_blower = 0.70          # blower efficiency, both blowers, fraction [A]
 dp_other_frac = 0.01       # pressure drop outside the TES bricks (receiver or PHX + piping),
                            #    fraction of P_loop, each loop [A]
 dT_wall = 20.0             # K, receiver wall above the mean gas temperature inside it [A]
-# Used only by the current lunar_plant.py (single TES loop); removed when it is updated:
-dp_loop = 0.03             # LEGACY: loop pressure drop at design flow, fraction of P_loop
-dT_charge = 150.0          # LEGACY: largest gas rise in the receiver while charging
+dT_charge = 150.0          # K, smallest gas temperature rise in the receiver: caps blower 1 flow [A]
 
 # --- 6. TES bricks in segments (lunar_tes.py, Step 3) ---------------------------------------
 # Sintered-regolith bricks stacked in N_segments equal segments along the gas path, insulated
@@ -140,7 +126,9 @@ T_TES_min = 450.0          # K, lower limit
 regolith_type = 'highlands'   # 'high_Ti_mare', 'low_Ti_mare', 'highlands' (pole: highlands)
 rho_TES = 2400.0           # kg/m3, sintered regolith density (oven-sintered simulant
                            #    2300-2570 kg/m3 [R23]); sets the store volume and surface
-TES_mass_margin = 1.20     # TES mass = margin x minimum mass for the longest darkness alone [A]
+TES_mass_margin = 2.50     # TES mass = margin x minimum mass for the longest darkness alone [A]
+                           #    2.5 at the ridge top: the darkest month also has a 58 h darkness and
+                           #    ~10 d of weak sun just before the longest one (1.2 gives a huge collector)
 N_segments = 10            # segments from end A (hot) to end B (cold), choose any number >= 2 [A]
 dp_seg = 0.25e5            # Pa, pressure drop in EACH segment (0.25 bar) [A]
                            #    (bricks in total: N_segments * dp_seg per loop)
@@ -194,10 +182,9 @@ emissivity = 0.85          # radiator emissivity (0.6-0.9) [A]
 # Lunar surface (habitat wall surroundings, Step 6): flat ground in radiative balance with
 # the visible sun, T = max(T_surf_night, T_surf_noon * (sin elevation)^0.25) (Step 8).
 # T_surf_night is set with the site (section 2).
-T_surf_noon = 392.0        # K, surface with the sun overhead (subsolar point, measured at the
-                           #    equator [R8]); a reference only: Step 8 scales it with the local
-                           #    sun elevation, so at the pole (sun within ~2 deg of the horizon)
-                           #    flat ground stays near T_surf_night
+T_surf_noon = 392.0        # K, surface with the sun overhead (subsolar point [R8]); a reference
+                           #    only: Step 8 scales it with the local sun elevation, so at the
+                           #    pole (sun within ~2 deg of the horizon) flat ground stays cold
 T_space = 3.0              # K, deep space
 sigma = 5.670374419e-8     # W/m2-K4, Stefan-Boltzmann constant
 
@@ -226,7 +213,6 @@ dT_hab_rad = 30.0          # K, use the heat pump when the sky is within this of
 n_cycle = 2 * int(round(t_lunar / (2 * dt)))
 t_lunar = n_cycle * dt
 eta_opt = rho_mirror * f_dust * f_intercept     # optical efficiency without the cosine factor
-T_charge_out_max = max(T_rec_set, T_TES_max + dT_charge)   # K, hottest gas (LEGACY plant table range)
 TIT_max = T_TES_max - dT_PHX               # K, turbine inlet with the TES full (design point)
 TIT_top = TIT_max                          # K, highest turbine inlet (same, sun or no sun)
 _L_hab = V_hab / (np.pi * D_hab**2 / 4)
@@ -247,21 +233,19 @@ assert W_elec_target > 0, "W_elec_target must be > 0"
 assert W_aux_fixed >= 0, "W_aux_fixed must be >= 0"
 assert w_helio_drive >= 0, "w_helio_drive must be >= 0"
 # heliostat field and receiver
-assert field_layout in ('surround', 'pole_side'), "field_layout must be 'surround' or 'pole_side'"
 assert 0 < beta_target_deg < 90, "beta_target_deg must be between 0 and 90"
 assert heliostat_spacing_ratio is None or heliostat_spacing_ratio > 0, "heliostat_spacing_ratio must be None or > 0"
 assert 0 < eta_opt <= 1, "rho_mirror * f_dust * f_intercept must be in (0, 1]"
 assert 0 < alpha_rec <= 1 and 0 < eps_rec <= 1, "Receiver absorptance/emittance must be in (0, 1]"
 assert C_ratio > 1, "C_ratio must be > 1"
 # gas loop
-assert 0 <= dp_loop < 0.2 and 0 < eta_blower <= 1, "Check dp_loop and eta_blower"
-assert dT_charge > 0, "dT_charge must be > 0"
+assert 0 < eta_blower <= 1, "eta_blower must be in (0, 1]"
+assert 0 < dT_charge < T_rec_set - T_TES_min, "dT_charge must be > 0 and below T_rec_set - T_TES_min"
 assert dT_wall >= 0, "dT_wall must be >= 0"
 assert P_loop > P_crit, "P_loop must be above the CO2 critical pressure"
 assert T_rec_set > T_TES_max, "T_rec_set must be above T_TES_max (the blocks charge from it)"
 assert 0 <= dp_other_frac < 0.1, "dp_other_frac must be in [0, 0.1)"
-assert T_charge_out_max <= 1100, \
-    f"Receiver sCO2 outlet ({T_charge_out_max:.0f} K) is above the CoolProp CO2 range (1100 K)"
+assert T_rec_set <= 1100, "Receiver sCO2 outlet is above the CoolProp CO2 range (1100 K)"
 # TES
 assert T_TES_max > T_TES_min, "T_TES_max must be greater than T_TES_min"
 assert T_TES_min >= 350, "Regolith cp correlation (Table 3, T > 350 K) needs T_TES_min >= 350 K"
@@ -309,13 +293,13 @@ for _name, _v, _lo, _hi, _u in [("T_comp_in", T_comp_in, 305, 320, "K"),
         say(f"Note: {_name} = {_v:g} {_u} is outside Table 2 ({_lo}-{_hi} {_u})")
 
 # --- 13. Log ---------------------------------------------------------------------------
-say(f"Inputs OK: site '{SITE}' (latitude {latitude_deg:.2f} deg; sunlight and darkness from Step 8), "
+say(f"Inputs OK: lunar south pole (latitude {latitude_deg:.2f} deg; sunlight and darkness from Step 8), "
     f"time step {dt:g} h, month {t_lunar:.0f} h = {n_cycle} steps")
 say(f"Cycles {cycles}, TES {T_TES_max:.0f} -> {T_TES_min:.0f} K, TIT max {TIT_max:.0f} K, "
     f"PR {P_high/P_low:.2f}, compressor inlet {T_comp_in:.0f}-{T_comp_in_max:.0f} K at {P_low/1e6:.1f} MPa")
 say(f"Demand: {W_elec_target:.0f} kWe + parasitic: controls {W_aux_fixed:.0f} kWe, gas-loop blower and "
     f"coolant pump (always), heliostat drives {w_helio_drive:g} W/m2 (sun up) -- solved each hour in Step 6")
-say(f"Heliostat field '{field_layout}', receiver {C_ratio:.0f}x, optics {eta_opt:.3f} | ground around "
+say(f"Heliostats all round the tower, receiver {C_ratio:.0f}x, optics {eta_opt:.3f} | ground around "
     f"TES {T_ground:.0f} K, coldest surface {T_surf_night:.0f} K, radiator sink {T_sink_night:.0f} K")
 say(f"TES gas loops (sCO2, {P_loop/1e6:.0f} MPa): receiver outlet {T_rec_set:.0f} K, PHX approach "
     f"{dT_PHX:.0f} K, other dp {dp_other_frac*100:g} % per loop, blowers eta {eta_blower:.2f}")

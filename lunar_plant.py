@@ -1,32 +1,25 @@
-# lunar_plant.py -- plant model of the lunar regolith-TES sCO2 system (layout of paper Fig. 2)
+# lunar_plant.py -- plant model of the lunar regolith-TES sCO2 system (two TES gas loops)
 # Loaded by Step 6 of the notebook (keep this file next to the notebook).
-# Not a stand-alone script: it uses the inputs (Step 2), the regolith properties (Step 3),
-# the cycle maps (Steps 4-5), the solar functions (Step 8 is loaded later; T_surface and
-# T_sink_t are only called once the hourly runs start) and np, CP, say() from Step 1.
+# Builds the complete plant around EACH cycle of Steps 4-5 (simple and recuperated): the
+# discharging TES gas loop + PHX, the power cycle, the coolant loop, the plant radiator, the
+# habitat and the parasitic loads. Both plants are built and solved separately (ct = cycle).
+# Not a stand-alone script: it uses the inputs (Step 2), the TES model (Step 3: gas_rho(),
+# loop_dp()), the cycle maps (Steps 4-5), the solar functions (Step 8 is loaded later;
+# T_surface and T_sink_t are only called once the time-step runs start) and np, CP, say().
 # ---------------------------------------------------------------------
-# Plant performance at one TES temperature (and time), for cycle ct -- layout of Fig. 2
-#   t     = simulation time, h (Step 9): sets the radiator sink and the habitat surroundings
-#           through Step 8. None = no sun (coldest surroundings)
-#   Q_rec = solar heat the receiver puts into the TES gas loop this step (kW, Step 9); 0 = no sun
+# plant_point(T_gas_A, t, ct, W_extra): the plant at one time step, for cycle ct
+#   T_gas_A = gas leaving TES end A (= PHX gas inlet), from the TES segments (Step 9)
+#   t       = simulation time, h: sets the radiator sink and the habitat surroundings (Step 8);
+#             None = no sun (coldest surroundings)
+#   W_extra = extra electric loads this step, kWe: heliostat drives + charging blower 1
+#             (Step 9); the charging loop itself is handled in Step 9 with lunar_tes.py
 #
-# TES gas loop (sCO2 at P_loop): receiver -> TES -> PHX -> blower -> receiver
-#   TES = ideal heat exchanger: the gas leaves the TES at T_TES (= PHX gas inlet), whatever
-#   temperature it enters at -- hotter when the sun charges the TES, colder in the dark or
-#   when the sun gives less than the cycle draws. PHX (counterflow, gas -> cycle sCO2):
-#   TIT = gas inlet - dT_PHX = T_TES - dT_PHX. The gas flow
-#   is the smallest that keeps every point of the PHX >= dT_PHX apart (r_gas = m_gas/m_cycle,
-#   pre-computed on the cycle map). By day it is also >= the flow that carries the heat
-#   stored in the TES with a rise of dT_charge: m_gas >= (Q_rec - Q_in) / (h(T_TES + dT_charge) - h(T_TES)).
-#   Gas leaving the PHX: h_out = h_in - m_cycle * q_in / m_gas; it returns through the blower
-#   to the receiver (sun) or straight to the TES (dark, receiver bypassed).
-#   Receiver: gas from h_out to h_out + Q_rec / m_gas; T_rec = mean gas temperature + dT_wall.
-#   By day the gas flow is capped at the loop's design flow; solar heat above what that flow
-#   can carry (Q_rec_max) is curtailed (heliostats defocused, Step 9).
-#   Blower: W = m_gas * dp / (rho(blower inlet) * eta_blower). The loop pressure drop
-#   (receiver + TES + PHX + piping, one lumped value) grows
-#   with flow like any duct: dp = dp_loop * P_loop * (m_gas^2/rho) / (m_gas^2/rho)_design, where
-#   the design point is the largest m_gas^2/rho of normal operation (found in Step 10;
-#   until then dp = dp_loop * P_loop).
+# Discharging TES gas loop (sCO2 at P_loop): blower 2 -> TES end B -> end A -> PHX -> blower 2
+#   PHX (counterflow, gas -> cycle sCO2): TIT = T_gas_A - dT_PHX (capped at TIT_top). Gas flow
+#   = the smallest that keeps every point of the PHX >= dT_PHX apart (r_gas = m_gas/m_cycle,
+#   pre-computed on the cycle map). Gas leaving the PHX: h_out = h(T_gas_A) - m_cycle q_in / m_gas;
+#   it goes to blower 2 and back into TES end B (returned as T_gas_cold).
+#   Blower 2: W = m_gas * loop_dp() / (rho(T_gas_cold) * eta_blower)   (lunar_tes.py)
 # Power cycle: tables from Steps 4-5 (state 1 = compressor inlet, after the precooler).
 # Coolant loop (water at P_cool_loop): precooler -> habitat heat exchanger -> radiator -> pump
 #   Precooler (counterflow, cycle sCO2 -> water): water enters at T1 - dT_precool; its flow is
@@ -35,15 +28,15 @@
 #   needs from the hot water first; the rest goes to the radiator panels, whose temperature
 #   falls with the water. Area per kg/s of water:
 #       A/m_w = integral of dh / (rad_sides*emissivity*sigma*(T(h)^4 - T_sink^4))
-#   The radiator is fixed hardware (A_RAD, sized at night). Each hour the plant uses the
-#   COLDEST compressor inlet T1 >= T_comp_in the radiator allows. If even T_comp_in_max is
-#   not enough, the cycle runs at REDUCED POWER (flow cut until the waste heat fits).
+#   The radiator is fixed hardware (A_RAD). Each step the plant uses the COLDEST compressor
+#   inlet T1 >= T_comp_in the radiator allows. If even T_comp_in_max is not enough, the cycle
+#   runs at REDUCED POWER (flow cut until the waste heat fits).
 #   Pump: W = m_water * dp_cool_loop / (rho_water * eta_pump).
-# Parasitic loads: W_aux = W_aux_fixed + heliostat drives (W_extra, day) + blower + pump;
+# Parasitic loads: W_aux = W_aux_fixed + W_extra + blower 2 + pump;
 #   W_net = (W_elec_target + W_aux) / eta_gen, solved by a short fixed-point loop
-#   (blower and pump grow with the cycle flow).
-# Habitat (Step 2): each hour
-#   wall loss   Q_wall = eps_MLI*sigma*A_hab*(T_hab^4 - T_outside^4)   (< 0 = gain by day)
+#   (blower 2 and the pump grow with the cycle flow).
+# Habitat (Step 2): each step
+#   wall loss   Q_wall = eps_MLI*sigma*A_hab*(T_hab^4 - T_outside^4)
 #   inside heat Q_int  = f_elec_inside*(W_elec_target - W_hp) + crew metabolic
 #   Q_int < Q_wall -> HEATING need, supplied from the coolant-loop water
 #   Q_int > Q_wall -> COOLING need, rejected by the habitat's own radiator at
@@ -57,7 +50,7 @@ def _table(fluid, P, T_lo, T_hi, n):
         np.array([CP.PropsSI('D', 'T', x, 'P', P, fluid) for x in T])
 
 _T_pc, _h_pc, _ = _table(FLUID, P_low, T_comp_in - 5, TIT_top + 5, 1500)        # cycle sCO2, precooler
-_T_g, _h_g, _rho_g = _table(FLUID, P_loop, 260.0, T_charge_out_max + 10, 1500)  # TES gas loop
+_T_g, _h_g, _rho_g = _table(FLUID, P_loop, 300.0, T_rec_set + 60, 1500)        # TES gas loop
 _T_w, _h_w, _rho_w = _table(COOLANT, P_cool_loop, T_comp_in - dT_precool - 5, T_cool_max + 5, 600)
 _rho_w_pump = float(np.interp(T_comp_in - dT_precool, _T_w, _rho_w))   # pump on the cold water
 _T_phx = np.linspace(T_comp_in, TIT_top + 0.5, 1500)                    # cycle sCO2 in the PHX
@@ -169,39 +162,17 @@ def habitat_balance(t=None):
                 A_hrad=Q_hrad / q_r if q_r > 0 else np.inf, T_out=T_out)
 
 def _loop_at_flow(c, m_c, L):
-    """Both loops for cycle values c (scalars or arrays over T1) at cycle flow m_c (kg/s)."""
+    """Discharging gas loop + coolant loop for cycle values c (scalars or arrays over T1) at
+    cycle flow m_c (kg/s)."""
     m_c = np.asarray(m_c, dtype=float)
-    Q_in = m_c * c['q_in'] / 1e3                                         # kW to the cycle
-    m_ch = np.maximum(L['Q_rec'] - Q_in, 0.0) * 1e3 / L['dh_ch']          # kg/s to carry the stored heat
-    # By day the gas flow may not exceed the loop's design flow (m_gas^2/rho = design): above
-    # it the heliostats are defocused. m_cap solves m^2 / rho(blower inlet at that flow) = ref.
-    # (Only needed while the sun charges the loop: at night Q_rec = 0, so no gas flow is
-    #  set by charging and the cap cannot act -- it is skipped, results are unchanged.)
-    ref = GAS_DP_REF[L['ct']]
-    with np.errstate(invalid='ignore', divide='ignore'):
-        if ref and L['Q_rec'] > 0:
-            m_cap = np.sqrt(ref * np.interp(L['hg_in'], _h_g, _rho_g)) * np.ones_like(Q_in)
-            for _ in range(6):
-                m_cap = np.sqrt(ref * np.interp(L['hg_in'] - Q_in * 1e3 / m_cap, _h_g, _rho_g))
-        else:
-            m_cap = np.full_like(Q_in, np.inf)
-    Q_rec_max = Q_in + m_cap * L['dh_ch'] / 1e3                         # kW the loop can take in
-    m_ch = np.minimum(m_ch, m_cap)
-    m_g = np.maximum(c['r_gas'] * m_c, m_ch)
     with np.errstate(invalid='ignore', divide='ignore', over='ignore'):
+        m_g = c['r_gas'] * m_c                                           # kg/s, blower 2
         hg_out = np.where(m_g > 0, L['hg_in'] - m_c * c['q_in'] / np.where(m_g > 0, m_g, 1.0), L['hg_in'])
-        rho_g = np.interp(hg_out, _h_g, _rho_g)                            # blower inlet (coldest gas)
-        dp = dp_loop * P_loop * (m_g**2 / rho_g / ref if ref else 1.0)   # Pa, loop pressure drop
-        W_bl = m_g * dp / (rho_g * eta_blower) / 1e3                      # kWe
+        T_g_out = np.interp(hg_out, _h_g, _T_g)                           # back to TES end B
+        W_bl = np.where(m_g > 0, m_g * loop_dp() / (gas_rho(T_g_out) * eta_blower) / 1e3, 0.0)
         m_w = c['r_w'] * m_c
         W_pump = m_w * dp_cool_loop / (_rho_w_pump * eta_pump) / 1e3     # kWe
-        Q_r = np.minimum(L['Q_rec'], Q_rec_max)                          # heat the receiver passes on
-        h_ro = np.where(m_g > 0, hg_out + Q_r * 1e3 / np.where(m_g > 0, m_g, 1.0), hg_out)
-    T_g_out = np.interp(hg_out, _h_g, _T_g)
-    T_ro = np.interp(h_ro, _h_g, _T_g)
-    T_rec = np.where(L['Q_rec'] > 0, 0.5 * (T_g_out + T_ro) + dT_wall, np.nan)
-    return dict(m_g=m_g, T_g_out=T_g_out, T_ro=T_ro, T_rec=T_rec, W_bl=W_bl, m_w=m_w, W_pump=W_pump,
-                dp=dp, rho_g=rho_g, Q_rec_max=Q_rec_max)
+    return dict(m_g=m_g, T_g_out=T_g_out, W_bl=W_bl, m_w=m_w, W_pump=W_pump)
 
 def _loop(c, L):
     """Shaft power for the habitat + all parasitic loads, with the loops at that flow."""
@@ -235,36 +206,23 @@ def _area_needed(c, m_w, T_sink, Q_heat=0.0):
 
 A_RAD = {ct: np.inf for ct in cycles}     # sized below, once the plant model exists
 
-GAS_DP_REF = {ct: None for ct in cycles}   # design m_gas^2/rho of the gas loop (Step 10)
+def _loop_context(T_gas_A, W_extra, ct):
+    """PHX gas inlet (= gas leaving TES end A) and the fixed parts of the loop calculation."""
+    return dict(T_ex=T_gas_A, hg_in=float(np.interp(T_gas_A, _T_g, _h_g)), ct=ct,
+                W_extra=float(W_extra), W_fix=W_elec_target + W_aux_fixed + W_extra)
 
-def _loop_context(T_TES, W_extra, Q_rec, ct):
-    """TES gas exit (= PHX gas inlet) and the fixed parts of the loop calculation.
-    Ideal TES heat exchange: the gas leaves the TES at T_TES, sun or no sun."""
-    T_ex = T_TES
-    hg_in = float(np.interp(T_ex, _T_g, _h_g))
-    return dict(T_ex=T_ex, hg_in=hg_in, Q_rec=float(Q_rec), W_extra=float(W_extra), ct=ct,
-                dh_ch=float(np.interp(T_ex + dT_charge, _T_g, _h_g)) - hg_in,
-                W_fix=W_elec_target + W_aux_fixed + W_extra)
-
-def plant_off(T_TES, t=None, ct='simple', L=None):
-    """Plant state when the cycle is off: no heat to the cycle, no electricity. By day the
-    blower still moves the gas that charges the TES."""
-    L = L or _loop_context(T_TES, 0.0, 0.0, ct)
-    m_g = L['Q_rec'] * 1e3 / L['dh_ch'] if L['Q_rec'] > 0 else 0.0
-    rho = float(np.interp(L['hg_in'], _h_g, _rho_g))
-    ref = GAS_DP_REF[ct]
-    dp = dp_loop * P_loop * (m_g**2 / rho / ref if ref else 1.0)
-    W_bl = m_g * dp / (rho * eta_blower) / 1e3
-    return dict(T_TES=T_TES, TIT=np.nan, dT_PHX_t=np.nan, h_phx_in=np.nan, too_cold=False,
+def plant_off(T_gas_A, t=None, ct='simple', L=None):
+    """Plant state when the cycle is off: no heat to the cycle, no electricity, blower 2 off."""
+    L = L or _loop_context(T_gas_A, 0.0, ct)
+    return dict(T_gas_A=T_gas_A, TIT=np.nan, dT_PHX_t=np.nan, h_phx_in=np.nan, too_cold=False,
                 eta=np.nan, m_dot=0.0,
                 Q_in=0.0, Q_out=0.0, W_c=0.0, W_t=0.0, W_net=0.0, Q_recup=0.0, W_gross=0.0,
-                W_aux=W_aux_fixed + L['W_extra'] + W_bl, W_elec=0.0, Q_hab=0.0,
+                W_aux=W_aux_fixed + L['W_extra'], W_elec=0.0, Q_hab=0.0,
                 Q_rad=0.0, A_rad=A_RAD[ct], A_need=np.inf, rad_use=np.nan,
                 T_sink=T_sink_night if t is None else float(T_sink_t(t)),
                 T_cooler_in=np.nan, T_comp_in=np.nan, running=False, part_load=False, load=0.0,
-                m_gas=m_g, W_blower=W_bl, W_pump=0.0, m_water=0.0, T_gas_hot=L['T_ex'],
-                dp_loop_t=dp / P_loop, K_gas=m_g**2 / rho, Q_rec_max=np.inf,
-                T_gas_cold=np.nan, T_rec=np.nan, T_rec_out=np.nan, T_w_hot=np.nan, T_w_cold=np.nan,
+                m_gas=0.0, W_blower=0.0, W_pump=0.0, m_water=0.0, T_gas_hot=T_gas_A,
+                T_gas_cold=np.nan, T_w_hot=np.nan, T_w_cold=np.nan,
                 **_hab_fields(habitat_balance(t), 0.0))
 
 def _hab_fields(hb, Q_hab):
@@ -273,7 +231,7 @@ def _hab_fields(hb, Q_hab):
                 Q_hab_cool=hb['Q_cool'], W_hp=hb['W_hp'], hp_on=hb['hp_on'],
                 Q_hab_wall=hb['Q_wall'], Q_hab_rad=hb['Q_hrad'], A_hab_rad=hb['A_hrad'])
 
-def _plant_state(T_TES, TIT, c, T1, W_net, A_need, T_sink, ct, load, hb, L):
+def _plant_state(T_gas_A, TIT, c, T1, W_net, A_need, T_sink, ct, load, hb, L):
     """All plant flows for cycle point c (scalars) at shaft power W_net."""
     m_dot = W_net * 1e3 / c['w_net']                      # kg/s cycle sCO2
     lp = _loop_at_flow(c, m_dot, L)
@@ -285,7 +243,7 @@ def _plant_state(T_TES, TIT, c, T1, W_net, A_need, T_sink, ct, load, hb, L):
     W_gross = W_net * eta_gen                             # kWe at the generator
     T_wc = T1 - dT_precool
     T_wh = float(np.interp(np.interp(T_wc, _T_w, _h_w) + c['q_out'] / c['r_w'], _h_w, _T_w))
-    return dict(T_TES=T_TES, TIT=TIT, dT_PHX_t=T_TES - TIT, h_phx_in=c['h_phx_in'], too_cold=False,
+    return dict(T_gas_A=T_gas_A, TIT=TIT, dT_PHX_t=T_gas_A - TIT, h_phx_in=c['h_phx_in'], too_cold=False,
                 eta=c['eta'], m_dot=m_dot, Q_in=Q_in, Q_out=Q_out,
                 W_c=m_dot * c['w_c'] / 1e3, W_t=m_dot * c['w_t'] / 1e3, W_net=W_net,
                 Q_recup=m_dot * c['q_rec'] / 1e3, W_gross=W_gross, W_aux=W_aux,
@@ -295,16 +253,13 @@ def _plant_state(T_TES, TIT, c, T1, W_net, A_need, T_sink, ct, load, hb, L):
                 part_load=load < 1 - 1e-9, load=load,
                 m_gas=float(lp['m_g']), W_blower=float(lp['W_bl']), W_pump=float(lp['W_pump']),
                 m_water=float(lp['m_w']), T_gas_hot=L['T_ex'], T_gas_cold=float(lp['T_g_out']),
-                dp_loop_t=float(lp['dp']) / P_loop, K_gas=float(lp['m_g'])**2 / float(lp['rho_g']),
-                Q_rec_max=float(lp['Q_rec_max']),
-                T_rec=float(lp['T_rec']), T_rec_out=float(lp['T_ro']) if L['Q_rec'] > 0 else np.nan,
                 T_w_hot=T_wh, T_w_cold=T_wc, **_hab_fields(hb, Q_hab))
 
-def _plant_at(TIT, T_TES, t, ct, hb, T_sink, L):
+def _plant_at(TIT, T_gas_A, t, ct, hb, T_sink, L):
     """Plant at a given turbine inlet temperature (coldest workable compressor inlet)."""
     r = cycle_row(TIT, ct)
     if not r['ok'].any():                                    # TIT too low for the cycle
-        p = plant_off(T_TES, t, ct, L)
+        p = plant_off(T_gas_A, t, ct, L)
         p['too_cold'] = True
         return p
     Qh = hb['Q_heat']
@@ -325,12 +280,12 @@ def _plant_at(TIT, T_TES, t, ct, hb, T_sink, L):
             We = eta_gen * Wn - (W_aux_fixed + L['W_extra'] + lp_s['W_bl'] + lp_s['W_pump'])
         We = np.where(np.isfinite(We), We, -np.inf)
         if not (We > 0).any():                               # no net power at all: off
-            return plant_off(T_TES, t, ct, L)
+            return plant_off(T_gas_A, t, ct, L)
         # use the coldest T1 that still gives net power: best efficiency, so the
         # TES is drained as little as possible for the power the radiator allows
         i = int(np.argmax(We > 0))
         c = {k: float(r[k][i]) for k in KEYS}
-        return _plant_state(T_TES, TIT, c, T1_grid[i], float(Wn[i]), A_RAD[ct],
+        return _plant_state(T_gas_A, TIT, c, T1_grid[i], float(Wn[i]), A_RAD[ct],
                             T_sink, ct, load=float(s[i]), hb=hb, L=L)
     i = int(np.argmax(good))                                 # coldest T1 that works
     if i == 0:
@@ -355,16 +310,16 @@ def _plant_at(TIT, T_TES, t, ct, hb, T_sink, L):
     lp = _loop(c, L)
     W_net = float(lp['W_net'])
     A_need = float(_area_needed(c, float(lp['m_w']), T_sink, Qh))
-    return _plant_state(T_TES, TIT, c, T1, W_net, A_need, T_sink, ct, load=1.0, hb=hb, L=L)
+    return _plant_state(T_gas_A, TIT, c, T1, W_net, A_need, T_sink, ct, load=1.0, hb=hb, L=L)
 
-def plant_point(T_TES, t=None, ct='simple', W_extra=0.0, Q_rec=0.0):
-    """Plant at TES temperature T_TES. W_extra = heliostat drives (kWe, Step 9);
-    Q_rec = solar heat into the gas loop this hour (kW, Step 9; 0 at night)."""
+def plant_point(T_gas_A, t=None, ct='simple', W_extra=0.0):
+    """Plant with the gas leaving TES end A at T_gas_A (K). W_extra = heliostat drives +
+    charging blower 1 (kWe, Step 9)."""
     T_sink = T_sink_night if t is None else float(T_sink_t(t))
     hb = habitat_balance(t)
-    L = _loop_context(T_TES, W_extra, Q_rec, ct)
+    L = _loop_context(T_gas_A, W_extra, ct)
     TIT = min(L['T_ex'] - dT_PHX, TIT_top)
-    return _plant_at(TIT, T_TES, t, ct, hb, T_sink, L)
+    return _plant_at(TIT, T_gas_A, t, ct, hb, T_sink, L)
 
 def phx_UA(p, ct):
     """PHX size UA (W/K) needed at plant state p: UA = m_cycle * integral dh_c / (T_gas - T_cycle)."""
@@ -378,7 +333,8 @@ def phx_UA(p, ct):
     y = 1.0 / (Tg - Tc)
     return p['m_dot'] * float(np.sum(0.5 * (y[1:] + y[:-1]) * np.diff(hc)))
 
-# --- Lowest TES temperature at which the plant still makes full power (no sun) ---
+# --- Lowest end-A gas temperature at which the plant still makes full power (no sun) ---
+# (kept under the name T_TES_cutoff: the TES is usable while the gas from end A is above it)
 for ct in cycles:
     T_ok = T_TES_max
     for T in np.arange(T_TES_max, T_TES_min - 0.1, -2.0):
@@ -388,8 +344,8 @@ for ct in cycles:
         T_ok = T
     CYC[ct]['T_TES_cutoff_cycle'] = CYC[ct]['T_TES_cutoff']
     CYC[ct]['T_TES_cutoff'] = max(CYC[ct]['T_TES_cutoff'], T_ok)
-    say(f"{ct:>11}: usable TES down to {CYC[ct]['T_TES_cutoff']:.0f} K "
-        f"(turbine inlet = TES - {dT_PHX:.0f} K)")
+    say(f"{ct:>11}: full power while the gas from TES end A is above {CYC[ct]['T_TES_cutoff']:.0f} K "
+        f"(turbine inlet = gas - {dT_PHX:.0f} K)")
 
 # --- Size the fixed radiator (no sun, coldest inlet, worst TES temperature) and the PHX ---
 A_RAD_night_need, UA_PHX = {}, {}
@@ -402,6 +358,6 @@ for ct in cycles:
     p0 = plant_point(T_TES_max, None, ct)
     say(f"{ct:>11}: radiator for the TES floor {A_RAD[ct]:6.0f} m2 of panel, {rad_sides}-sided "
         f"({A_RAD[ct] * rad_areal_mass / 1e3:.1f} t at {rad_areal_mass:.0f} kg/m2) | PHX UA "
-        f"{UA_PHX[ct]/1e3:.1f} kW/K | no sun, TES full: gas {p0['m_gas']:.2f} kg/s "
-        f"{p0['T_gas_hot']:.0f}->{p0['T_gas_cold']:.0f} K; water {p0['m_water']:.2f} kg/s "
-        f"{p0['T_w_cold']:.0f}->{p0['T_w_hot']:.0f} K (blower and radiator final in Step 10)")
+        f"{UA_PHX[ct]/1e3:.1f} kW/K | gas from end A at {T_TES_max:.0f} K: blower 2 {p0['m_gas']:.2f} kg/s, "
+        f"{p0['W_blower']:.1f} kWe, gas {p0['T_gas_hot']:.0f}->{p0['T_gas_cold']:.0f} K (back to end B); "
+        f"water {p0['m_water']:.2f} kg/s {p0['T_w_cold']:.0f}->{p0['T_w_hot']:.0f} K (radiator final in Step 10)")
